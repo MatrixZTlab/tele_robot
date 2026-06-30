@@ -1,0 +1,51 @@
+# =====================================================
+# Head camera configuration
+# =====================================================
+# camera topic
+head_camera:
+  # camera config
+
+  # if enable_zmq and enable_webrtc are both false, the camera will not start
+  # Set to true to enable ZMQ publishing, false to disable
+  enable_zmq: true
+  # Port to publish camera stream, e.g. zmq tcp://*:55555.  image_client.py should connect to the same port
+  zmq_port : 55555
+  # Set to true to enable WebRTC publishing, false to disable
+  enable_webrtc: true
+  # Port for WebRTC signaling server
+  webrtc_port : 60001
+  # webrtc codec preference, options: "vp8", "h264"
+  webrtc_codec: h264
+
+  # Type of camera:
+  #   - "opencv"    → opencv driver
+  #   - "realsense" → pyrealsense2 driver
+  #   - "uvc"       → pyuvc driver
+  #   - "orbbec"    → pyorbbec driver
+  type: orbbec
+
+  # Image Format
+  # image resolution: [height, width]
+  # image_shape: [480, 1280]
+  image_shape: [480, 640]
+  binocular: false
+  # frame per second
+  fps: 30
+
+  # Camera identifiers (choose one or more):
+  #   - video_id: X        → /dev/videoX  (e.g. 0 → /dev/video0)
+  #   - serial_number: Y   → camera's hardware serial (e.g. 141722079879)
+  #   - physical_path: Z   → sysfs physical USB path (e.g. /sys/devices/pci0000:00/.../1-11.2:1.0)
+  #
+  # Identifier priority:
+  #   physical_path > serial_number > video_id
+  #   if an identifier is not used, set it to null. The system will resolve the camera by priority.
+  #
+  # Notes:
+  #   - type "realsense": supports serial_number only (but a RealSense can also be used as opencv/uvc if desired)
+  #   - type "opencv":    supports video_id, serial_number, physical_path
+  #   - type "uvc":       supports video_id, serial_number, physical_path
+  #   - type "orbbec":    supports video_id, serial_number, physical_path
+  video_id: 10
+  serial_number: CP2G853000D1
+  physical_path: null

@@ -1,0 +1,1539 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com)
+     Commit Version: 1.6.0-1-g15f4949  Build Version: 1.6.7594.29634
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="TopstarRobot">
+  <link name="world">
+  </link>
+  <joint name="world_joint" type="fixed">
+  <parent link="world" />
+  <child link="base_link" />
+  </joint>
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.00937612070573952 1.27694074343828E-06 0.424566729505006"
+        rpy="0 0 0" />
+      <mass
+        value="35.0971781408717" />
+      <inertia
+        ixx="3.276193276006"
+        ixy="0.000142297622762635"
+        ixz="-0.084514937404162"
+        iyy="3.31448685690065"
+        iyz="0.000139641087315871"
+        izz="2.26198096029747" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="Wheel_Rotation_1_1_Link">
+    <inertial>
+      <origin
+        xyz="0.117267539988422 0.16626523825377 0.419698504013311"
+        rpy="0 0 0" />
+      <mass
+        value="60.7946049032394" />
+      <inertia
+        ixx="15.0583549226964"
+        ixy="-0.0211046556657369"
+        ixz="2.20193868293628"
+        iyy="13.3007155764286"
+        iyz="0.0583500137448702"
+        izz="8.10088105045817" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_1_1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_1_1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_1_1_Joint"
+    type="continuous">
+    <origin
+      xyz="-0.22 -0.165 0.1415"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Wheel_Rotation_1_1_Link" />
+    <axis
+      xyz="0 0 -1" />
+  </joint>
+  <link
+    name="Wheel_Rotation_1_2_Link">
+    <inertial>
+      <origin
+        xyz="4.97541791230627E-06 2.54894032563485E-06 -0.0280564471353739"
+        rpy="0 0 0" />
+      <mass
+        value="1.02673982662102" />
+      <inertia
+        ixx="0.00269019034237406"
+        ixy="1.33513285905252E-08"
+        ixz="5.35131412839118E-09"
+        iyy="0.00269018022429338"
+        iyz="1.48159985144239E-08"
+        izz="0.00148545441656153" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_1_2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_1_2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_1_2_Joint"
+    type="continuous">
+    <origin
+      xyz="0 0 -0.109"
+      rpy="1.5707963267949 0 0" />
+    <parent
+      link="Wheel_Rotation_1_1_Link" />
+    <child
+      link="Wheel_Rotation_1_2_Link" />
+    <axis
+      xyz="0 0 -1" />
+  </joint>
+  <link
+    name="Wheel_Rotation_2_1_Link">
+    <inertial>
+      <origin
+        xyz="0.117267539988419 -0.163734761746222 0.419698504013315"
+        rpy="0 0 0" />
+      <mass
+        value="60.7946049032394" />
+      <inertia
+        ixx="15.0583549226964"
+        ixy="-0.0211046556656975"
+        ixz="2.20193868293632"
+        iyy="13.3007155764286"
+        iyz="0.0583500137447768"
+        izz="8.10088105045819" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_2_1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_2_1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_2_1_Joint"
+    type="continuous">
+    <origin
+      xyz="-0.22 0.165 0.1415"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Wheel_Rotation_2_1_Link" />
+    <axis
+      xyz="0 0 -1" />
+  </joint>
+  <link
+    name="Wheel_Rotation_2_2_Link">
+    <inertial>
+      <origin
+        xyz="1.3097621360536E-06 5.51336617973797E-06 -0.0280569074547031"
+        rpy="0 0 0" />
+      <mass
+        value="1.02672646416384" />
+      <inertia
+        ixx="0.00269016840684892"
+        ixy="6.54093489985595E-09"
+        ixz="-4.52689623593841E-09"
+        iyy="0.00269019620241585"
+        iyz="1.47518258453803E-08"
+        izz="0.00148545150040884" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_2_2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_2_2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_2_2_Joint"
+    type="continuous">
+    <origin
+      xyz="0 0 -0.109"
+      rpy="1.57079632679488 0 0" />
+    <parent
+      link="Wheel_Rotation_2_1_Link" />
+    <child
+      link="Wheel_Rotation_2_2_Link" />
+    <axis
+      xyz="0 0 1" />
+  </joint>
+  <link
+    name="Wheel_Rotation_3_1_Link">
+    <inertial>
+      <origin
+        xyz="-0.322732460011578 0.16626523825377 0.419698504013312"
+        rpy="0 0 0" />
+      <mass
+        value="60.7946049032393" />
+      <inertia
+        ixx="15.0583549226964"
+        ixy="-0.0211046556657373"
+        ixz="2.20193868293628"
+        iyy="13.3007155764286"
+        iyz="0.0583500137448712"
+        izz="8.10088105045817" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_3_1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_3_1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_3_1_Joint"
+    type="continuous">
+    <origin
+      xyz="0.22 -0.165 0.1415"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Wheel_Rotation_3_1_Link" />
+    <axis
+      xyz="0 0 -1" />
+  </joint>
+  <link
+    name="Wheel_Rotation_3_2_Link">
+    <inertial>
+      <origin
+        xyz="-5.1962166243702E-06 2.26097684125071E-06 -0.0280569074547031"
+        rpy="0 0 0" />
+      <mass
+        value="1.02672646416384" />
+      <inertia
+        ixx="0.00269019306943947"
+        ixy="-1.09567852499059E-08"
+        ixz="-1.53187535022357E-08"
+        iyy="0.00269017153982529"
+        iyz="-1.85605669094047E-09"
+        izz="0.00148545150040884" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_3_2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_3_2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_3_2_Joint"
+    type="continuous">
+    <origin
+      xyz="0 0 -0.109"
+      rpy="1.5707963267949 0 0" />
+    <parent
+      link="Wheel_Rotation_3_1_Link" />
+    <child
+      link="Wheel_Rotation_3_2_Link" />
+    <axis
+      xyz="0 0 -1" />
+  </joint>
+  <link
+    name="Wheel_Rotation_4_1_Link">
+    <inertial>
+      <origin
+        xyz="-0.322732460011578 -0.16373476174623 0.419698504013312"
+        rpy="0 0 0" />
+      <mass
+        value="60.7946049032394" />
+      <inertia
+        ixx="15.0583549226964"
+        ixy="-0.0211046556657376"
+        ixz="2.20193868293628"
+        iyy="13.3007155764286"
+        iyz="0.0583500137448713"
+        izz="8.10088105045818" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_4_1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_4_1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_4_1_Joint"
+    type="continuous">
+    <origin
+      xyz="0.22 0.165 0.1415"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Wheel_Rotation_4_1_Link" />
+    <axis
+      xyz="0 0 -1" />
+  </joint>
+  <link
+    name="Wheel_Rotation_4_2_Link">
+    <inertial>
+      <origin
+        xyz="-4.7786382593451E-06 -2.90111988223568E-06 -0.0280564471353729"
+        rpy="0 0 0" />
+      <mass
+        value="1.02673982662102" />
+      <inertia
+        ixx="0.00269018836902476"
+        ixy="1.39402430059618E-08"
+        ixz="-4.26888116939928E-09"
+        iyy="0.00269018219764268"
+        iyz="-1.51633448964009E-08"
+        izz="0.00148545441656153" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_4_2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Wheel_Rotation_4_2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Wheel_Rotation_4_2_Joint"
+    type="continuous">
+    <origin
+      xyz="0 0 -0.109"
+      rpy="1.5707963267949 0 0" />
+    <parent
+      link="Wheel_Rotation_4_1_Link" />
+    <child
+      link="Wheel_Rotation_4_2_Link" />
+    <axis
+      xyz="0 0 1" />
+  </joint>
+  <link
+    name="Robot_Body_Movement_Link">
+    <inertial>
+      <origin
+        xyz="0.235521833046413 -0.0148504222298925 1.27051488473806E-05"
+        rpy="0 0 0" />
+      <mass
+        value="1.01594834020874" />
+      <inertia
+        ixx="0.00212972510203881"
+        ixy="-1.17847901935844E-12"
+        ixz="-2.90361201760017E-08"
+        iyy="0.00213319130235006"
+        iyz="1.85431223588724E-11"
+        izz="0.00212964214429291" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Body_Movement_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Body_Movement_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Body_Movement_Joint"
+    type="prismatic">
+    <origin
+      xyz="-0.079985 0 0.4155"
+      rpy="-3.1416 0 3.1416" />
+    <parent
+      link="base_link" />
+    <child
+      link="Robot_Body_Movement_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-0.45"
+      upper="0"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Body_Rotation_Link">
+    <inertial>
+      <origin
+        xyz="-0.00664526066791099 0.253696748887376 -0.00329312994662501"
+        rpy="0 0 0" />
+      <mass
+        value="5.76401386506953" />
+      <inertia
+        ixx="0.111233660402198"
+        ixy="-0.00448526287035043"
+        ixz="2.99043674112476E-05"
+        iyy="0.0859576197077528"
+        iyz="-0.000744866322570856"
+        izz="0.0822689669888544" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Body_Rotation_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Body_Rotation_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Body_Rotation_Joint"
+    type="revolute">
+    <origin
+      xyz="0.23601 0 0"
+      rpy="-1.5708 0 0" />
+    <parent
+      link="Robot_Body_Movement_Link" />
+    <child
+      link="Robot_Body_Rotation_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.6581"
+      upper="0"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Head_Rotation_Link">
+    <inertial>
+      <origin
+        xyz="0.000300510868471437 -0.00236592746043375 0.158893647139943"
+        rpy="0 0 0" />
+      <mass
+        value="1.48084227852521" />
+      <inertia
+        ixx="0.011809573691104"
+        ixy="-1.23100072393483E-06"
+        ixz="-5.14674059637137E-05"
+        iyy="0.0115033967598257"
+        iyz="0.000372354469355371"
+        izz="0.00145580215064893" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Head_Rotation_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Head_Rotation_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Head_Rotation_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.0329999999994309 0.509299999995742 0"
+      rpy="1.5707963267949 0 -3.14159265358979" />
+    <parent
+      link="Robot_Body_Rotation_Link" />
+    <child
+      link="Robot_Head_Rotation_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.5708"
+      upper="1.5708"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Head_Tonod_Link">
+    <inertial>
+      <origin
+        xyz="-0.0783187469688673 0.0101964342530232 0.00104586020733064"
+        rpy="0 0 0" />
+      <mass
+        value="0.657045840678179" />
+      <inertia
+        ixx="0.00518271882626937"
+        ixy="-0.000154434897914051"
+        ixz="-4.59614089498862E-05"
+        iyy="0.00657940316124111"
+        iyz="7.64472050153757E-06"
+        izz="0.00242277778986456" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Head_Tonod_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Head_Tonod_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Head_Tonod_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.00068442 0 0.2645"
+      rpy="1.5708 0 0" />
+    <parent
+      link="Robot_Head_Rotation_Link" />
+    <child
+      link="Robot_Head_Tonod_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-0.48869"
+      upper="0.55851"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Left_Hand_base_Link">
+    <inertial>
+      <origin
+        xyz="-0.00109520489972148 0.000960725370228621 0.0953850853683491"
+        rpy="0 0 0" />
+      <mass
+        value="1.61125842502544" />
+      <inertia
+        ixx="0.00616211017778792"
+        ixy="-1.5887483585665E-06"
+        ixz="8.3932427634699E-05"
+        iyy="0.00618214841113866"
+        iyz="-2.80887782565768E-05"
+        izz="0.00245106116546493" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_base_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_base_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Left_Hand_base_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.014999999999436 0.564299999995742 -0.120499999954992"
+      rpy="3.14159265358979 0 3.14159265358979" />
+    <parent
+      link="Robot_Body_Rotation_Link" />
+    <child
+      link="Robot_Left_Hand_base_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Left_Hand_1_Link">
+    <inertial>
+      <origin
+        xyz="0.0174953231349635 -0.00106631048242478 -0.000591432827655225"
+        rpy="0 0 0" />
+      <mass
+        value="0.610685925653705" />
+      <inertia
+        ixx="0.00262331622368732"
+        ixy="-6.12647092478382E-05"
+        ixz="-6.0315868987423E-06"
+        iyy="0.00300928460520553"
+        iyz="-2.02729207070996E-06"
+        izz="0.00145045168557124" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Left_Hand_1_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.144499999954925"
+      rpy="3.14159265358979 -1.5707963267949 0" />
+    <parent
+      link="Robot_Left_Hand_base_Link" />
+    <child
+      link="Robot_Left_Hand_1_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.8"
+      upper="0.43633"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Left_Hand_2_Link">
+    <inertial>
+      <origin
+        xyz="0.000182962589830582 0.000552915023325995 0.0835633414480478"
+        rpy="0 0 0" />
+      <mass
+        value="1.54085657659473" />
+      <inertia
+        ixx="0.00808424230132278"
+        ixy="-1.57374440544528E-06"
+        ixz="-1.00249696604009E-05"
+        iyy="0.00873820931913368"
+        iyz="-5.81671771070823E-05"
+        izz="0.00265915803921788" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Left_Hand_2_Joint"
+    type="revolute">
+    <origin
+      xyz="0.104500000042635 0 0"
+      rpy="0 1.5707963267949 0" />
+    <parent
+      link="Robot_Left_Hand_1_Link" />
+    <child
+      link="Robot_Left_Hand_2_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Left_Hand_3_Link">
+    <inertial>
+      <origin
+        xyz="0.0548272099240494 0.00129196535878862 0.000159036878549346"
+        rpy="0 0 0" />
+      <mass
+        value="1.13386968923313" />
+      <inertia
+        ixx="0.00139093196605245"
+        ixy="1.81681714750998E-05"
+        ixz="8.38080767622414E-06"
+        iyy="0.00476846130329405"
+        iyz="6.22988267955207E-08"
+        izz="0.00466817860727092" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_3_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_3_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Left_Hand_3_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.195500000000001"
+      rpy="3.14159265358979 -1.5707963267949 0" />
+    <parent
+      link="Robot_Left_Hand_2_Link" />
+    <child
+      link="Robot_Left_Hand_3_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <!-- <limit
+      lower="-1.7977"
+      upper="0.43633"
+      effort="0"
+      velocity="0" /> -->
+    <limit
+      lower="-0.43633"
+      upper="1.7977"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Left_Hand_4_Link">
+    <inertial>
+      <origin
+        xyz="0.000115368459815357 0.00133377048607786 0.0540409700019756"
+        rpy="0 0 0" />
+      <mass
+        value="0.292165368495988" />
+      <inertia
+        ixx="0.000469421734986643"
+        ixy="-6.07971231079979E-07"
+        ixz="-6.85253599737323E-06"
+        iyy="0.000820889349689261"
+        iyz="-7.87909677870675E-06"
+        izz="0.000633077581309064" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_4_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_4_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Left_Hand_4_Joint"
+    type="revolute">
+    <origin
+      xyz="0.151195021788382 0 0"
+      rpy="0 1.5707963267949 0" />
+    <parent
+      link="Robot_Left_Hand_3_Link" />
+    <child
+      link="Robot_Left_Hand_4_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.9322"
+      upper="2.9322"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Left_Hand_5_Link">
+    <inertial>
+      <origin
+        xyz="-0.0384897846715503 0.000147541772006266 0.000475455698624061"
+        rpy="0 0 0" />
+      <mass
+        value="0.892471927917057" />
+      <inertia
+        ixx="0.000929520279501374"
+        ixy="-3.76165716021241E-06"
+        ixz="-1.82180509724984E-05"
+        iyy="0.00223096534554974"
+        iyz="3.81299049236197E-08"
+        izz="0.00213690622714581" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_5_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_5_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Left_Hand_5_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0935"
+      rpy="3.14159265358979 1.5707963267949 0" />
+    <parent
+      link="Robot_Left_Hand_4_Link" />
+    <child
+      link="Robot_Left_Hand_5_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-2.35619449"
+      upper="2.35619449"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Left_Hand_6_Link">
+    <inertial>
+      <origin
+        xyz="-0.0010328703638206 -0.000108974075910817 0.0145010420001304"
+        rpy="0 0 0" />
+      <mass
+        value="0.0818130368165535" />
+      <inertia
+        ixx="4.30404033424961E-05"
+        ixy="9.28647065248038E-09"
+        ixz="-2.03595539820434E-07"
+        iyy="4.28491839854835E-05"
+        iyz="4.03002810785472E-08"
+        izz="7.84719925410552E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_6_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Left_Hand_6_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Left_Hand_6_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.118999999999982 0 0"
+      rpy="3.14159265358979 1.5707963267949 0" />
+    <parent
+      link="Robot_Left_Hand_5_Link" />
+    <child
+      link="Robot_Left_Hand_6_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.8798"
+      upper="2.8798"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Right_Hand_base_Link">
+    <inertial>
+      <origin
+        xyz="-0.00109520489972159 0.000960725370228732 0.0953850853683489"
+        rpy="0 0 0" />
+      <mass
+        value="1.61125842502544" />
+      <inertia
+        ixx="0.00616211017778787"
+        ixy="-1.58874835857351E-06"
+        ixz="8.39324276347075E-05"
+        iyy="0.00618214841113863"
+        iyz="-2.80887782565685E-05"
+        izz="0.00245106116546492" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_base_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_base_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Right_Hand_base_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.014999999999425 0.564299999995742 0.120500000044995"
+      rpy="0 0 0" />
+    <parent
+      link="Robot_Body_Rotation_Link" />
+    <child
+      link="Robot_Right_Hand_base_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Right_Hand_1_Link">
+    <inertial>
+      <origin
+        xyz="0.0174953228014945 -0.00106630999985624 -0.00059143340008283"
+        rpy="0 0 0" />
+      <mass
+        value="0.610685916960213" />
+      <inertia
+        ixx="0.00262331619300465"
+        ixy="-6.12647102991883E-05"
+        ixz="-6.03157790168246E-06"
+        iyy="0.00300928458445763"
+        iyz="-2.027311737431E-06"
+        izz="0.00145045166463448" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Right_Hand_1_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.144499999954922"
+      rpy="3.14159265358979 -1.5707963267949 0" />
+    <parent
+      link="Robot_Right_Hand_base_Link" />
+    <child
+      link="Robot_Right_Hand_1_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.570796327"
+      upper="0.436332313"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Right_Hand_2_Link">
+    <inertial>
+      <origin
+        xyz="0.000179586216130068 0.000552916107810164 0.0835633402799717"
+        rpy="0 0 0" />
+      <mass
+        value="1.54085664815911" />
+      <inertia
+        ixx="0.00808424244796842"
+        ixy="-1.5736857265376E-06"
+        ixz="-1.00250243694214E-05"
+        iyy="0.00873820949429983"
+        iyz="-5.81671226124437E-05"
+        izz="0.00265915817755819" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Right_Hand_2_Joint"
+    type="revolute">
+    <origin
+      xyz="0.104500000042647 0 0"
+      rpy="0 1.5707963267949 0" />
+    <parent
+      link="Robot_Right_Hand_1_Link" />
+    <child
+      link="Robot_Right_Hand_2_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Right_Hand_3_Link">
+    <inertial>
+      <origin
+        xyz="0.0548272099240492 0.00129196535878895 0.000159036878549401"
+        rpy="0 0 0" />
+      <mass
+        value="1.13386968923313" />
+      <inertia
+        ixx="0.00139093196605245"
+        ixy="1.81681714751087E-05"
+        ixz="8.38080767622877E-06"
+        iyy="0.00476846130329407"
+        iyz="6.2298826794306E-08"
+        izz="0.00466817860727095" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_3_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_3_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Right_Hand_3_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.195499999999992"
+      rpy="3.14159265358979 -1.5707963267949 0" />
+    <parent
+      link="Robot_Right_Hand_2_Link" />
+    <child
+      link="Robot_Right_Hand_3_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.79768913"
+      upper="0.436332313"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Right_Hand_4_Link">
+    <inertial>
+      <origin
+        xyz="0.000115383620124254 0.00133381327217086 0.0540409580133061"
+        rpy="0 0 0" />
+      <mass
+        value="0.292164944371151" />
+      <inertia
+        ixx="0.000469421310477729"
+        ixy="-6.07806416996628E-07"
+        ixz="-6.85263185472586E-06"
+        iyy="0.000820888780640669"
+        iyz="-7.87919568232427E-06"
+        izz="0.000633076669651694" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_4_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_4_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Right_Hand_4_Joint"
+    type="revolute">
+    <origin
+      xyz="0.151195021788382 0 0"
+      rpy="0 1.5707963267949 0" />
+    <parent
+      link="Robot_Right_Hand_3_Link" />
+    <child
+      link="Robot_Right_Hand_4_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.932153143"
+      upper="2.932153143"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Right_Hand_5_Link">
+    <inertial>
+      <origin
+        xyz="0.038489784673046 -0.000147541774264126 0.00047425349789415"
+        rpy="0 0 0" />
+      <mass
+        value="0.892471927814883" />
+      <inertia
+        ixx="0.000929520279288206"
+        ixy="-3.76165718867334E-06"
+        ixz="1.82180509147516E-05"
+        iyy="0.00223096534538923"
+        iyz="-3.8129817113385E-08"
+        izz="0.0021369062270543" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_5_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_5_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Right_Hand_5_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0934999999999999"
+      rpy="3.14159265358979 -1.5707963267949 0" />
+    <parent
+      link="Robot_Right_Hand_4_Link" />
+    <child
+      link="Robot_Right_Hand_5_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-2.35619449"
+      upper="2.35619449"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Robot_Right_Hand_6_Link">
+    <inertial>
+      <origin
+        xyz="0.0010328703638206 0.000108974075910817 0.0145010420001307"
+        rpy="0 0 0" />
+      <mass
+        value="0.0818130368165538" />
+      <inertia
+        ixx="4.30404033424963E-05"
+        ixy="9.2864706524298E-09"
+        ixz="2.03595539820434E-07"
+        iyy="4.28491839854837E-05"
+        iyz="-4.03002810785664E-08"
+        izz="7.84719925410554E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_6_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Topstar/meshes/Robot_Right_Hand_6_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Robot_Right_Hand_6_Joint"
+    type="revolute">
+    <origin
+      xyz="0.118999999999982 0 0"
+      rpy="0 1.5707963267949 0" />
+    <parent
+      link="Robot_Right_Hand_5_Link" />
+    <child
+      link="Robot_Right_Hand_6_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.8798"
+      upper="2.8798"
+      effort="0"
+      velocity="0" />
+  </joint>
+
+  <link name="io_teleop_right_ee_link"/>
+  <joint name="io_teleop_right_ee_joint" type="fixed">
+    <parent link="Robot_Right_Hand_6_Link"/>
+    <child link="io_teleop_right_ee_link"/>
+    <origin rpy="0 0 0" xyz="0 0 0.03" />
+  </joint>
+  <link name="io_teleop_left_ee_link"/>
+  <joint name="io_teleop_left_ee_joint" type="fixed">
+    <parent link="Robot_Left_Hand_6_Link"/>
+    <child link="io_teleop_left_ee_link"/>
+    <origin rpy="0 0 0" xyz="0 0 0.03" />
+  </joint>
+</robot>

@@ -1,0 +1,15 @@
+head_camera:
+  enable_zmq: true
+  zmq_port: 55555
+  enable_webrtc: true
+  webrtc_port: 60001
+  webrtc_codec: h264
+  type: orbbec
+  image_shape:
+  - 480
+  - 640
+  binocular: true
+  fps: 30
+  video_id: 10
+  serial_number: CP2G853000D1
+  physical_path: null
