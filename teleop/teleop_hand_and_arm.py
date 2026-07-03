@@ -22,6 +22,7 @@ from teleop.robot_control._base.control_mode import ControlMode
 from teleimager.image_client import ImageClient
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.record import Recorder, RecorderManager
+from teleop.utils.episode_writer import EpisodeWriter
 import queue as _queue
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -150,12 +151,16 @@ def on_press(key):
         if 'recorder_manager' in globals() and recorder_manager is not None:
             try:
                 recorder_manager.stop_program()
+                if 'episode_writer' in globals() and episode_writer is not None:
+                    episode_writer.save_episode()
                 logger_mp.info("Recording session saved.")
                 recorder_manager.ensure_program_active(
                     program_name=args.task_name,
                     description=args.task_desc,
                     filepath=os.path.join(args.task_dir, args.task_name),
                 )
+                if 'episode_writer' in globals() and episode_writer is not None:
+                    episode_writer.create_episode()
                 logger_mp.info("New recording session started.")
             except Exception:
                 logger_mp.exception("Failed to save/restart recording session")
@@ -165,6 +170,8 @@ def on_press(key):
             try:
                 if getattr(recorder_manager.recorder, '_servo_recording', False):
                     recorder_manager.stop_servo_recording()
+                    if 'episode_writer' in globals() and episode_writer is not None:
+                        episode_writer.save_episode()
                     logger_mp.info("ServoJ recording STOPPED")
                 else:
                     recorder_manager.ensure_program_active(
@@ -173,6 +180,8 @@ def on_press(key):
                         filepath=os.path.join(args.task_dir, args.task_name),
                     )
                     recorder_manager.start_servo_recording()
+                    if 'episode_writer' in globals() and episode_writer is not None:
+                        episode_writer.create_episode()
                     logger_mp.info("ServoJ recording STARTED")
             except Exception:
                 logger_mp.exception("Failed to toggle ServoJ recording")
@@ -374,6 +383,27 @@ if __name__ == '__main__':
                 recorder_manager.start()
             except Exception:
                 logger_mp.exception('Failed to initialize trajectory recorder')
+
+            # multi-modal episode writer: samples RGB images + states/actions into
+            # per-episode directories (episode_XXXX/{colors,data.json}), aligned with
+            # xr_teleoperate's EpisodeWriter output format.
+            try:
+                # camera_config['head_camera']['image_shape'] is (height, width)
+                # (see the binocular slicing below which indexes image_shape[1] as
+                # width); EpisodeWriter expects [width, height], so swap here.
+                _img_shape = camera_config['head_camera']['image_shape']
+                episode_image_size = [_img_shape[1], _img_shape[0]]
+                episode_writer = EpisodeWriter(
+                    task_dir=os.path.join(args.task_dir, args.task_name),
+                    task_goal=args.task_goal,
+                    task_desc=args.task_desc,
+                    task_steps=args.task_steps,
+                    frequency=args.frequency,
+                    image_size=episode_image_size,
+                    rerun_log=not args.headless,
+                )
+            except Exception:
+                logger_mp.exception('Failed to initialize episode writer')
 
         # replay mode: if requested, set up Replay + adapter + consumer and run replay then exit
         if args.replay is not None:
@@ -692,6 +722,8 @@ if __name__ == '__main__':
                             try:
                                 if getattr(recorder_manager.recorder, '_servo_recording', False):
                                     recorder_manager.stop_servo_recording()
+                                    if 'episode_writer' in globals() and episode_writer is not None:
+                                        episode_writer.save_episode()
                                     logger_mp.info("XR Left B/Y: ServoJ recording STOPPED")
                                 else:
                                     recorder_manager.ensure_program_active(
@@ -700,6 +732,8 @@ if __name__ == '__main__':
                                         filepath=os.path.join(args.task_dir, args.task_name),
                                     )
                                     recorder_manager.start_servo_recording()
+                                    if 'episode_writer' in globals() and episode_writer is not None:
+                                        episode_writer.create_episode()
                                     logger_mp.info("XR Left B/Y: ServoJ recording STARTED")
                             except Exception:
                                 logger_mp.exception('Failed to toggle ServoJ via XR')
@@ -895,6 +929,8 @@ if __name__ == '__main__':
                         try:
                             if getattr(recorder_manager.recorder, '_servo_recording', False):
                                 recorder_manager.stop_servo_recording()
+                                if 'episode_writer' in globals() and episode_writer is not None:
+                                    episode_writer.save_episode()
                                 logger_mp.info("XR Left B/Y: ServoJ recording STOPPED")
                             else:
                                 recorder_manager.ensure_program_active(
@@ -903,6 +939,8 @@ if __name__ == '__main__':
                                     filepath=os.path.join(args.task_dir, args.task_name),
                                 )
                                 recorder_manager.start_servo_recording()
+                                if 'episode_writer' in globals() and episode_writer is not None:
+                                    episode_writer.create_episode()
                                 logger_mp.info("XR Left B/Y: ServoJ recording STARTED")
                         except Exception:
                             logger_mp.exception('Failed to toggle ServoJ via XR')
@@ -952,7 +990,7 @@ if __name__ == '__main__':
                 recording_snapshot = robot.step(tele_data)
 
                 # ── 录制（机器人无关）──
-                if args.record and RECORD_RUNNING:
+                if args.record and getattr(recorder_manager.recorder, '_servo_recording', False):
                     try:
                         colors = {}
                         depths = {}
@@ -962,7 +1000,7 @@ if __name__ == '__main__':
                                 colors[f"color_{1}"] = head_img.bgr[:, camera_config['head_camera']['image_shape'][1]//2:]
                         else:
                             if head_img is not None:
-                                colors[f"color_{0}"] = head_img
+                                colors[f"color_{0}"] = head_img.bgr
 
                         # 构建 states/actions（与 RobotDriver._collect_recording_state 对齐）
                         left_arm_state = recording_snapshot.get("left_arm_state", [])
@@ -988,6 +1026,9 @@ if __name__ == '__main__':
                             "body": {"qpos": body_action},
                         }
                         # TODO: 回写 sim_state
+
+                        if 'episode_writer' in globals() and episode_writer is not None:
+                            episode_writer.add_item(colors=colors, states=states, actions=actions)
                     except Exception:
                         logger_mp.exception("Failed to record trajectory data")
                         raise
@@ -1040,6 +1081,14 @@ if __name__ == '__main__':
                     logger_mp.info("Recording saved on exit.")
         except Exception as e:
             logger_mp.error(f"Failed to save recording on exit: {e}")
+
+        # close episode writer (flushes any pending episode and stops its worker thread)
+        try:
+            if args.record and 'episode_writer' in locals() and episode_writer is not None:
+                episode_writer.close()
+                logger_mp.info("Episode writer closed on exit.")
+        except Exception as e:
+            logger_mp.error(f"Failed to close episode writer on exit: {e}")
 
         # 3. graceful rclpy shutdown (prevents "terminate called without an active exception")
         try:
