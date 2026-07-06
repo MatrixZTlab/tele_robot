@@ -22,7 +22,7 @@ from teleop.robot_control._base.control_mode import ControlMode
 from teleimager.image_client import ImageClient
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.record import Recorder, RecorderManager
-from teleop.utils.episode_writer import EpisodeWriter
+from teleop.utils.lerobot_episode_writer import LeRobotEpisodeWriter, default_repo_id
 import queue as _queue
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -232,7 +232,8 @@ if __name__ == '__main__':
     parser.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
     parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
-    parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
+    parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording metadata')
+    parser.add_argument('--lerobot-repo-id', type=str, default=None, help='LeRobot dataset repo id metadata, defaults to local/<task-name>')
     parser.add_argument('--sync-tolerance-s', type=float, default=1e-4,
                         help='LeRobot-style timestamp tolerance metadata for recorded samples')
     parser.add_argument('--camera-sync-tolerance-s', type=float, default=0.02,
@@ -392,27 +393,22 @@ if __name__ == '__main__':
             except Exception:
                 logger_mp.exception('Failed to initialize trajectory recorder')
 
-            # multi-modal episode writer: samples RGB images + states/actions into
-            # per-episode directories (episode_XXXX/{colors,data.json}), aligned with
-            # xr_teleoperate's EpisodeWriter output format.
+            # Multi-modal dataset writer: samples RGB/depth images + states/actions
+            # directly into a LeRobotDataset. Alignment timing details are stored
+            # as a sidecar under meta/tele_robot_alignment.jsonl.
             try:
-                # camera_config['head_camera']['image_shape'] is (height, width)
-                # (see the binocular slicing below which indexes image_shape[1] as
-                # width); EpisodeWriter expects [width, height], so swap here.
-                _img_shape = camera_config['head_camera']['image_shape']
-                episode_image_size = [_img_shape[1], _img_shape[0]]
-                episode_writer = EpisodeWriter(
-                    task_dir=os.path.join(args.task_dir, args.task_name),
-                    task_goal=args.task_goal,
-                    task_desc=args.task_desc,
-                    task_steps=args.task_steps,
-                    frequency=args.frequency,
-                    image_size=episode_image_size,
+                lerobot_root = os.path.join(args.task_dir, args.task_name)
+                episode_writer = LeRobotEpisodeWriter(
+                    root=lerobot_root,
+                    repo_id=args.lerobot_repo_id or default_repo_id(args.task_name),
+                    fps=args.frequency,
+                    task=args.task_goal or args.task_name,
+                    robot_type=robot.config.model_name,
                     tolerance_s=args.sync_tolerance_s,
-                    rerun_log=not args.headless,
+                    use_videos=True,
                 )
             except Exception:
-                logger_mp.exception('Failed to initialize episode writer')
+                logger_mp.exception('Failed to initialize LeRobot dataset writer')
 
         # replay mode: if requested, set up Replay + adapter + consumer and run replay then exit
         if args.replay is not None:
