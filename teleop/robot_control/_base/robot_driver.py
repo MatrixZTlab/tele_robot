@@ -38,9 +38,6 @@ class RobotDriver(ABC):
         # 相对位姿模式：激活瞬间的 EE 位姿（冻结基准，防漂移）
         self._init_left_ee: Optional[np.ndarray] = None
         self._init_right_ee: Optional[np.ndarray] = None
-        # 上一次 wrist_ref 是否存在（边缘检测，判断重新激活）
-        self._prev_l_ref: bool = False
-        self._prev_r_ref: bool = False
         # 回放时上一次 gripper 指令（未下发新指令时保持上一状态）
         self._last_ee_action: Optional[list] = None
 
@@ -123,9 +120,6 @@ class RobotDriver(ABC):
             # ── 镜像映射：左手数据 → 右臂，右手数据 → 左臂 ──
             l_ref = getattr(tele_data, 'left_wrist_ref', None)
             if l_ref is not None:
-                if not self._prev_l_ref:          # 刚激活：重新冻结
-                    self._init_right_ee = None
-                    print("[REL_POSE] left_wrist_ref activated, will re-capture init_right_ee")
                 if self._init_right_ee is None:   # 首次或重新激活时捕获
                     self._init_right_ee = right_ee.copy()
                     print(f"[REL_POSE] init_right_ee captured from FK (pos={right_ee[:3,3]})")
@@ -139,13 +133,9 @@ class RobotDriver(ABC):
                 if self._init_right_ee is not None:
                     print("[REL_POSE] left_wrist_ref cleared, init_right_ee reset")
                 self._init_right_ee = None
-            self._prev_l_ref = l_ref is not None
 
             r_ref = getattr(tele_data, 'right_wrist_ref', None)
             if r_ref is not None:
-                if not self._prev_r_ref:          # 刚激活：重新冻结
-                    self._init_left_ee = None
-                    print("[REL_POSE] right_wrist_ref activated, will re-capture init_left_ee")
                 if self._init_left_ee is None:   # 首次或重新激活时捕获
                     self._init_left_ee = left_ee.copy()
                     print(f"[REL_POSE] init_left_ee captured from FK (pos={left_ee[:3,3]})")
@@ -159,7 +149,6 @@ class RobotDriver(ABC):
                 if self._init_left_ee is not None:
                     print("[REL_POSE] right_wrist_ref cleared, init_left_ee reset")
                 self._init_left_ee = None
-            self._prev_r_ref = r_ref is not None
 
             # relative_pose 模式不做头部 IK
             ik_result = self.ik.solve_ik(
@@ -193,6 +182,19 @@ class RobotDriver(ABC):
 
         # ⑦ 录制快照
         return self._collect_recording_state(ik_result, current_q)
+
+    def reset_relative_pose_state(self, side: str = 'both') -> None:
+        """当外层激活臂或切换模式时调用，强制清除 _init_ee 以便 step() 重新捕获 FK 基准。
+
+        Args:
+            side: 'left'  → 清除 _init_left_ee（右手→左臂）
+                  'right' → 清除 _init_right_ee（左手→右臂）
+                  'both'  → 全部清除
+        """
+        if side in ('left', 'both'):
+            self._init_left_ee = None
+        if side in ('right', 'both'):
+            self._init_right_ee = None
 
     def go_home(self, timeout: float = 10.0) -> None:
         """回到零位。"""

@@ -1,34 +1,12 @@
 <div align="center">
-  <h1 align="center">xr_teleoperate</h1>
+  <h1 align="center">tele_robot</h1>
   <p align="center">
     <a> English </a> | <a href="README_zh-CN.md">中文</a> | <a href="README_ja-JP.md">日本語</a>
   </p>
 </div>
 
 
-# 📺 Video Demo
-
-<p align="center">
-  <table>
-    <tr>
-      <td align="center" width="50%">
-        <a href="https://www.youtube.com/watch?v=OTWHXTu09wE" target="_blank">
-          <img src="https://img.youtube.com/vi/OTWHXTu09wE/maxresdefault.jpg" alt="Video 1" width="75%">
-        </a>
-        <p><b> G1 (29DoF) + Dex3-1 </b></p>
-      </td>
-      <td align="center" width="50%">
-        <a href="https://www.youtube.com/watch?v=pNjr2f_XHoo" target="_blank">
-          <img src="https://img.youtube.com/vi/pNjr2f_XHoo/maxresdefault.jpg" alt="Video 2" width="75%">
-        </a>
-        <p><b> H1_2 (Arm 7DoF) </b></p>
-      </td>
-    </tr>
-  </table>
-</p>
-
-
-# 🔖[Release Note](CHANGELOG.md)
+# 🔖 [Release Note](CHANGELOG.md)
 
 ## 🏷️ v1.5 (2025.12.29)
 
@@ -44,7 +22,7 @@
 This repository implements **teleoperation** control of a **humanoid robot** using **XR (Extended Reality) devices** (such as Apple Vision Pro, PICO 4 Ultra Enterprise, or Meta Quest 3). 
 
 > If you have never worked with a humanoid robot before, please at least read up to the “Application Development” chapter in the [official documentation]() first.
-Additionally, the [Wiki of this repo](http://10.110.150.241:5656/zt_ai/robot_control/tele_robot/wikis) contains a wealth of background knowledge that you can reference at any time.
+Additionally, the [Wiki of this repo](https://github.com/MatrixZTlab/tele_robot/wikis) contains a wealth of background knowledge that you can reference at any time.
 
 Here are the required devices and wiring diagram,
 
@@ -63,36 +41,16 @@ The currently supported devices in this repository:
     <th align="center">⚪ Status</th>
   </tr>
   <tr>
-    <td align="center">G1 (29 DoF)</td>
+    <td align="center">TOPSTAR_H1</td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center">G1 (23 DoF)</td>
+    <td align="center">TOPSTAR_H2</td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center">H1 (4‑DoF arm)</td>
+    <td align="center">Suction Cup</td>
     <td align="center">✅ Complete</td>
-  </tr>
-  <tr>
-    <td align="center">H1_2 (7‑DoF arm)</td>
-    <td align="center">✅ Complete</td>
-  </tr>
-  <tr>
-    <td align="center">Dex1‑1 gripper</td>
-    <td align="center">✅ Complete</td>
-  </tr>
-  <tr>
-    <td align="center">Dex3‑1 dexterous hand</td>
-    <td align="center">✅ Complete</td>
-  </tr>
-  <tr>
-    <td align="center">Inspire dexterous hand</td>
-    <td align="center">✅ Complete</td>
-  </tr>
-  <tr>
-    <td style="text-align: center;"> <a href="https://www.brainco-hz.com/docs/revolimb-hand/" target="_blank"> BrainCo dexterous hand </td>
-    <td style="text-align: center;"> &#9989; Complete </td>
   </tr>
   <tr>
     <td align="center"> ··· </td>
@@ -104,7 +62,7 @@ The currently supported devices in this repository:
 
 # 1. 📦 Installation
 
-We tested our code on Ubuntu 20.04 and Ubuntu 22.04, other operating systems may be configured differently. This document primarily describes the **default mode**.
+We tested our code on Ubuntu 22.04, other operating systems may be configured differently. This document primarily describes the **default mode**.
 
 For more information, you can refer to [Official Documentation ]() and [OpenTeleVision](https://github.com/OpenTeleVision/TeleVision).
 
@@ -115,73 +73,69 @@ For more information, you can refer to [Official Documentation ]() and [OpenTele
 (base) user@host:~$ conda create -n tv python=3.10 pinocchio=3.1.0 numpy=1.26.4 -c conda-forge
 (base) user@host:~$ conda activate tv
 # Clone this repo
-(tv) user@host:~$ git clone http://10.110.150.241:5656/zt_ai/robot_control/tele_robot
-(tv) user@host:~$ cd xr_teleoperate
+(tv) user@host:~$ git clone https://github.com/MatrixZTlab/tele_robot
+(tv) user@host:~$ cd tele_robot
 # Shallow clone submodule
-(tv) user@host:~/xr_teleoperate$ git submodule update --init --depth 1
+(tv) user@host:~/tele_robot$ git submodule update --init --depth 1
 ```
 
 ```bash
 # Install teleimager submodule
-(tv) user@host:~/xr_teleoperate$ cd teleop/teleimager
-(tv) user@host:~/xr_teleoperate/teleop/teleimager$ pip install -e . --no-deps
+(tv) user@host:~/tele_robot$ cd teleop/teleimager
+(tv) user@host:~/tele_robot/teleop/teleimager$ pip install -e . --no-deps
 ```
 
 ```bash
 # Install televuer submodule
-(tv) user@host:~/xr_teleoperate$ cd teleop/televuer
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ pip install -e .
+(tv) user@host:~/tele_robot$ cd teleop/televuer
+(tv) user@host:~/tele_robot/teleop/televuer$ pip install -e .
 
 # Configure SSL certificates for the televuer module so that XR devices (e.g., Pico / Quest / Apple Vision Pro) can securely connect via HTTPS / WebRTC
 # 1. Generate certificate files
 # 1.1 For Pico / Quest XR devices
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pem
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pem
 # 1.2 For Apple Vision Pro
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ openssl genrsa -out rootCA.key 2048
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 365 -out rootCA.pem -subj "/CN=xr-teleoperate"
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ openssl genrsa -out key.pem 2048
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ openssl req -new -key key.pem -out server.csr -subj "/CN=localhost"
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl genrsa -out rootCA.key 2048
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 365 -out rootCA.pem -subj "/CN=tele-robot"
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl genrsa -out key.pem 2048
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl req -new -key key.pem -out server.csr -subj "/CN=localhost"
 # Create server_ext.cnf file with the following content (IP.2 should match your host IP, e.g., 192.168.123.2. Use ifconfig or similar to check)
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ vim server_ext.cnf
+(tv) user@host:~/tele_robot/teleop/televuer$ vim server_ext.cnf
 subjectAltName = @alt_names
 [alt_names]
 DNS.1 = localhost
 IP.1 = 192.168.123.164
 IP.2 = 192.168.123.2
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ openssl x509 -req -in server.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out cert.pem -days 365 -sha256 -extfile server_ext.cnf
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ ls
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl x509 -req -in server.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out cert.pem -days 365 -sha256 -extfile server_ext.cnf
+(tv) user@host:~/tele_robot/teleop/televuer$ ls
 build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA.pem  rootCA.srl  server.csr  server_ext.cnf  src  test
 # Copy rootCA.pem to Apple Vision Pro via AirDrop and install it
 
 # Enable firewall
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ sudo ufw allow 8012
+(tv) user@host:~/tele_robot/teleop/televuer$ sudo ufw allow 8012
 
 # 2. Configure certificate paths, choose one method
 # 2.1 User config directory (optional)
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ mkdir -p ~/.config/xr_teleoperate/
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ cp cert.pem key.pem ~/.config/xr_teleoperate/
+(tv) user@host:~/tele_robot/teleop/televuer$ mkdir -p ~/.config/tele_robot/
+(tv) user@host:~/tele_robot/teleop/televuer$ cp cert.pem key.pem ~/.config/tele_robot/
 # 2.2 Environment variables (optional)
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ echo 'export XR_TELEOP_CERT="$HOME/xr_teleoperate/teleop/televuer/cert.pem"' >> ~/.bashrc
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ echo 'export XR_TELEOP_KEY="$HOME/xr_teleoperate/teleop/televuer/key.pem"' >> ~/.bashrc
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ source ~/.bashrc
+(tv) user@host:~/tele_robot/teleop/televuer$ echo 'export XR_TELEOP_CERT="$HOME/tele_robot/teleop/televuer/cert.pem"' >> ~/.bashrc
+(tv) user@host:~/tele_robot/teleop/televuer$ echo 'export XR_TELEOP_KEY="$HOME/tele_robot/teleop/televuer/key.pem"' >> ~/.bashrc
+(tv) user@host:~/tele_robot/teleop/televuer$ source ~/.bashrc
 ```
 
 
 
-## 1.2 🕹️ robot-sdk
+## 1.2 🕹️ TopstarSDK
 
 ```bash
-# Install robot-sdk library which handles communication with the robot
+# Install TopstarSDK library which handles communication with the robot
 (tv) user@host:~$ git clone <your-sdk-url>.git
-(tv) user@host:~$ cd robot-sdk
-(tv) user@host:~/robot-sdk$ pip install -e .
+(tv) user@host:~$ cd TopstarSDK
+(tv) user@host:~/TopstarSDK$ pip install -e .
 ```
 
-> **Note 1:** For `xr_teleoperate` versions **v1.1 and above**, please ensure that the `robot-sdk` repository is checked out to a commit **equal to or newer than** [404fe44d76f705c002c97e773276f2a8fefb57e4](<your-sdk-url>/commit/404fe44d76f705c002c97e773276f2a8fefb57e4).
->
-> **Note 2**: The [dds_wrapper](<your-dds-url>) in the original h1_2 branch was a temporary version. It has now been fully migrated to the official Python-based control and communication library: [robot-sdk](<your-sdk-url>).
->
-> **Note 3**: All identifiers in front of the command are meant for prompting: **Which device and directory the command should be executed on**.
+> **Note 1**: All identifiers in front of the command are meant for prompting: **Which device and directory the command should be executed on**.
 >
 > In the Ubuntu system's `~/.bashrc` file, the default configuration is: `PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '`
 >
@@ -203,24 +157,29 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |      ⚙️ Parameter      |                        📜 Description                         |                     🔘 Available Options                      |     📌 Default     |
 | :-------------------: | :----------------------------------------------------------: | :----------------------------------------------------------: | :---------------: |
 |     `--frequency`     |            Set the FPS for recording and control             |                  Any reasonable float value                  |       30.0        |
-|    `--input-mode`     |       Choose XR input mode (how to control the robot)        |   `hand` (hand tracking)`controller` (controller tracking)   |      `hand`       |
-|   `--display-mode`    |  Choose XR display mode (how to view the robot perspective)  | `immersive` (immersive)`ego` (pass-through + small first-person window)`pass-through` (pass-through only) |    `immersive`    |
-|        `--arm`        |      Select the robot arm type (see 0. 📖 Introduction)       |                 `G1_29` `G1_23` `H1_2` `H1`                  |      `G1_29`      |
-|        `--ee`         | Select the end-effector type of the arm (see 0. 📖 Introduction) |     `dex1` `dex3` `inspire_ftp` `inspire_dfx` `brainco`      |       None        |
+|    `--input-mode`     |       Choose XR input mode (how to control the robot)        |   `hand` (hand tracking) `controller` (controller tracking)   |      `hand`       |
+|   `--display-mode`    |  Choose XR display mode (how to view the robot perspective)  | `immersive` `ego` `pass-through` |    `immersive`    |
+|     `--robot`      |      Select the robot arm type (see 0. 📖 Introduction)       |                 `TOPSTAR_H1` `TOPSTAR_H2`                  |  `TOPSTAR_H1`      |
+|  `--control-mode`   |       Select control mode for arms and head       |     `arms_only` `arms_head` `arms_head_torso` `full_body`      |   `arms_head`    |
+|        `--ee`         | Select the end-effector type (see 0. 📖 Introduction) |       `suction_cup`      |       None        |
 |   `--img-server-ip`   | Set the image server IP address for receiving image streams and configuring WebRTC signaling |                        `IPv4` address                        | `192.168.123.164` |
 | `--network-interface` |    Set the network interface for CycloneDDS communication    |                    Network Interface Name                    |      `None`       |
+|    `--arm-scale`    |   Arm reach scaling factor (e.g., 0.8)    |        Any float value         |       `1.0`       |
 
 - **Mode switch parameters**
 
 | ⚙️ Parameter  |                        📜 Description                         |
 | :----------: | :----------------------------------------------------------: |
-|  `--motion`  | **Enable motion control mode** When enabled, the teleoperation program can run alongside the robot’s motion control program.In **hand tracking** mode, the [R3 controller]() can be used to control normal robot walking; in **controller tracking** mode, joysticks can also control the robot’s movement.<br />Note: Only `Regular mode` (R1+X) is supported, `Running mode` (R2+A) is not supported. |
+|  `--motion`  | **Enable motion control mode** When enabled, the teleoperation program can run alongside the robot's motion control program. In **hand tracking** mode, the R3 controller can be used to control normal robot walking; in **controller tracking** mode, joysticks can also control the robot's movement.<br />Note: Only `Regular mode` (R1+X) is supported, `Running mode` (R2+A) is not supported. |
 | `--headless` | **Enable headless mode** For running the program on devices without a display, e.g., the Development Computing Unit (PC2). |
-|   `--sim`    | **Enable [simulation mode](<sim-link>)** |
-|   `--ipc`    | **Inter-process communication mode** Allows controlling the xr_teleoperate program’s state via IPC. Suitable for interaction with agent programs. |
+|   `--sim`    | **Enable simulation mode** |
+|   `--ipc`    | **Inter-process communication mode** Allows controlling the tele_robot program's state via IPC. Suitable for interaction with agent programs. |
 | `--affinity` | **CPU affinity mode** Set CPU core affinity. If you are unsure what this is, do not set it. |
 |  `--record`  | **Enable data recording mode** Press **r** to start teleoperation, then **s** to start recording; press **s** again to stop and save the episode. Press **s** repeatedly to repeat the process. |
+|  `--replay`  | **Replay mode** Replay a recorded trajectory. Use `--replay` (fast) or `--replay first` (slow/safe). Requires `--replay-file`. |
+| `--replay-file` | Path to trajectory JSON file for replay. |
 |  `--task-*`  | Configure the save path, target, description, and steps of the recorded task. |
+| `--body-*`   | Configure body movement velocity/height limits in sim mode with controller input. |
 
 ## 1.4 🔄 State Transition Diagram
 
@@ -237,12 +196,12 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 
 First, install [robot_sim](<sim-link>). Follow that repo’s README.
 
-Then launch the simulation with a G1(29 DoF) and Dex3 hand configuration:
+Then launch the simulation:
 
 ```bash
 (base) user@host:~$ conda activate robot_sim_env
 (robot_sim_env) user@host:~$ cd ~/robot_sim
-(robot_sim_env) user@host:~/robot_sim$ python sim_main.py --device cpu --enable_cameras --task Isaac-PickPlace-Cylinder-G129-Dex3-Joint --enable_dex3_dds --robot_type g129
+(robot_sim_env) user@host:~/robot_sim$ python sim_main.py --device cpu --enable_cameras
 ```
 
 💥💥💥 NOTICE❗
@@ -259,13 +218,13 @@ Here is the simulation GUI:
 
 This program supports XR control of a physical robot or in simulation. Choose modes with command-line arguments:
 
-Assuming hand tracking with G1(29 DoF) + Dex3 in simulation with recording:
+Example with TOPSTAR_H2 in simulation with recording and suction cup:
 
 ```bash
-(tv) user@host:~$ cd ~/xr_teleoperate/teleop/
-(tv) user@host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --xr-mode=hand --arm=G1_29 --ee=dex3 --sim --record
-# Simplified (defaults apply):
-(tv) user@host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --record
+(tv) user@host:~$ cd ~/tele_robot/teleop/
+(tv) user@host:~/tele_robot/teleop/$ python teleop_hand_and_arm.py --robot=TOPSTAR_H2 --sim --record
+# With suction cup:
+(tv) user@host:~/tele_robot/teleop/$ python teleop_hand_and_arm.py --robot=TOPSTAR_H2 --ee=suction_cup --sim --record
 ```
 
 After the program starts, the terminal shows:
@@ -325,13 +284,13 @@ Next steps:
 
    <p align="center">         </p>
 
-8. Press **r** in the terminal to begin teleoperation. You can now control the robot arm and dexterous hand.
+8. Press **r** in the terminal to begin teleoperation. You can now control the robot arm.
 
 9. During teleoperation, press **s** to start recording; press **s** again to stop and save. Repeatable process.
 
 <p align="center">         </p>
 
-> **Note 1**: Recorded data is stored in `xr_teleoperate/teleop/utils/data` by default, with usage instructions at this repo:  [robot_IL](<lerobot-link>/tree/main?tab=readme-ov-file#data-collection-and-conversion).
+> **Note 1**: Recorded data is stored in `teleop/utils/data` by default, with usage instructions at this repo:  [robot_IL](<lerobot-link>/tree/main?tab=readme-ov-file#data-collection-and-conversion).
 >
 > **Note 2**: Please pay attention to your disk space size during data recording.
 >
@@ -351,7 +310,7 @@ Physical deployment steps are similar to simulation, with these key differences:
 
 In the simulation environment, the image service is automatically enabled. For physical deployment, you need to manually start the image service based on your specific camera hardware. The steps are as follows:
 
-1. Install the image service program on the **Development Computing Unit PC2** of the robot (G1/H1/H1_2, etc.)
+1. Install the image service program on the **Development Computing Unit PC2** of the robot (TOPSTAR_H1/TOPSTAR_H2, etc.)
 
    ```bash
    # SSH into PC2 and download the image service repository
@@ -365,15 +324,15 @@ In the simulation environment, the image service is automatically enabled. For p
 2. On the **local host**, execute the following commands:
 
    ```bash
-   # Copy the `key.pem` and `cert.pem` files configured in Section 1.1 from the **local host** `xr_teleoperate/teleop/televuer` directory to the corresponding path on PC2
+   # Copy the `key.pem` and `cert.pem` files configured in Section 1.1 from the **local host** `tele_robot/teleop/televuer` directory to the corresponding path on PC2
    
    # These two files are required by teleimager to start the WebRTC service
-   (tv) user@host:~$ scp ~/xr_teleoperate/teleop/televuer/key.pem ~/xr_teleoperate/teleop/televuer/cert.pem user@192.168.123.164:~/teleimager
+   (tv) user@host:~$ scp ~/tele_robot/teleop/televuer/key.pem ~/tele_robot/teleop/televuer/cert.pem user@192.168.123.164:~/teleimager
    
    # On PC2, configure the certificate path according to the teleimager repository README, for example:
    (teleimager) user@pc2:~$ cd teleimager
-   (teleimager) user@pc2:~$ mkdir -p ~/.config/xr_teleoperate/
-   (teleimager) user@pc2:~/teleimager$ cp cert.pem key.pem ~/.config/xr_teleoperate/
+   (teleimager) user@pc2:~$ mkdir -p ~/.config/tele_robot/
+   (teleimager) user@pc2:~/teleimager$ cp cert.pem key.pem ~/.config/tele_robot/
    ```
 
 3. On the **development computing unit PC2**, configure `cam_config_server.yaml` according to the teleimager documentation and start the image service.
@@ -388,55 +347,15 @@ In the simulation environment, the image service is automatically enabled. For p
 4. On the **local host**, execute the following command to subscribe to the images
 
    ```bash
-   (tv) user@host:~$ cd ~/xr_teleoperate/teleop/teleimager/src
-   (tv) user@host:~/xr_teleoperate/teleop/teleimager/src$ python -m teleimager.image_client --host 192.168.123.164
+   (tv) user@host:~$ cd ~/tele_robot/teleop/teleimager/src
+   (tv) user@host:~/tele_robot/teleop/teleimager/src$ python -m teleimager.image_client --host 192.168.123.164
    
    # If the WebRTC image stream is set up, you can also open the URL [https://192.168.123.164:60001](https://192.168.123.164:60001) in a browser and click the Start button to test.
    ```
 
    
 
-## 3.2 ✋ Inspire Hand Service (optional)
-
-> **Note 1**: Skip this if your config does not use the Inspire hand.
->
-> **Note 2**: For G1 robot with [Inspire DFX hand](), related issue [#46]().
->
-> **Note 3**: For [Inspire FTP hand](()), related issue [#48](). FTP dexterous hand is now supported. Please refer to the `--ee` parameter for configuration.
-
-First, use [this URL: DFX_inspire_service](<dfx-link>) to clone the dexterous hand control interface program. And Copy it to **PC2** of  robots. 
-
-On robot's **PC2**, execute command:
-
-```bash
-user@pc2:~$ sudo apt install libboost-all-dev libspdlog-dev
-# Build project
-user@pc2:~$ cd DFX_inspire_service && mkdir build && cd build
-user@pc2:~/DFX_inspire_service/build$ cmake ..
-user@pc2:~/DFX_inspire_service/build$ make -j6
-
-# (For robot) Terminal 1.
-user@pc2:~/DFX_inspire_service/build$ sudo ./inspire_g1
-# or (For robot) Terminal 1.
-user@pc2:~/DFX_inspire_service/build$ sudo ./inspire_h1 -s /dev/ttyUSB0
-
-# Terminal 2. Run example
-user@pc2:~/DFX_inspire_service/build$ ./hand_example
-```
-
-If two hands open and close continuously, it indicates success. Once successful, close the `./hand_example` program in Terminal 2.
-
-
-
-## 3.3 ✋ BrainCo Hand Service (Optional)
-
-Please refer to the [Repo README](<brainco-link>) for setup instructions.
-
-## 3.4 ✋ Dex1_1 Service (Optional)
-
-Please refer to the [Repo README](<dex1_1_service>) for setup instructions.
-
-## 3.5 🚀 Launch
+## 3.2 🚀 Launch
 
 >  ![Warning](https://img.shields.io/badge/Warning-Important-red)
 >
@@ -452,7 +371,7 @@ Please refer to the [Repo README](<dex1_1_service>) for setup instructions.
 
 Same as simulation but follow the safety warnings above.
 
-## 3.6 🔚 Exit
+## 3.3 🔚 Exit
 
 > ![Warning](https://img.shields.io/badge/Warning-Important-red)
 >
@@ -469,12 +388,12 @@ Same as simulation but follow the safety warnings above.
 # 4. 🗺️ Codebase Overview
 
 ```
-xr_teleoperate/
+tele_robot/
 │
 ├── assets                    [Stores robot URDF-related files]
 │
 ├── teleop
-│   ├── teleimager            [New image service library, supporting multiple features]
+│   ├── teleimager            [Image service library, supporting multiple features]
 │   │
 │   ├── televuer
 │   │      ├── src/televuer
@@ -489,8 +408,7 @@ xr_teleoperate/
 │   │      ├── robot_arm_ik.py     [Inverse kinematics for the arm]
 │   │      ├── robot_arm.py        [Controls dual-arm joints and locks other parts]
 │   │      ├── hand_retargeting.py [Wrapper for the dexterous hand retargeting library]
-│   │      ├── robot_hand_inspire.py  [Controls Inspire dexterous hand]
-│   │      ├── robot_hand.py  [Controls dexterous hand]
+│   │      ├── robot_hand.py  [Controls dexterous hand / suction cup]
 │   │
 │   ├── utils
 │   │      ├── episode_writer.py          [Used to record data for imitation learning]
@@ -522,16 +440,16 @@ This code builds upon following open-source code-bases. Please visit the URLs to
 6. https://github.com/meshcat-dev/meshcat-python
 7. https://github.com/zeromq/pyzmq
 8. https://github.com/Dingry/BunnyVisionPro
-9. <your-sdk-url>
-10. https://github.com/ARCLab-MIT/beavr-bot
+9. https://github.com/ARCLab-MIT/beavr-bot
+10. https://github.com/unitreerobotics/xr_teleoperate
 
 # 7. 📝 Citation
 
 ```
-@misc{xr-teleoperate,
+@misc{tele-robot,
   author       = {{robotics}},
-  title        = {{XR-Teleoperate}: An Open-Source Teleoperation Framework and Data Collection Toolkit for Embodied Intelligence},
-  howpublished = {\url{http://10.110.150.241:5656/zt_ai/robot_control/tele_robot}},
+  title        = {{Tele-Robot}: An Open-Source Teleoperation Framework and Data Collection Toolkit for Embodied Intelligence},
+  howpublished = {\url{https://github.com/MatrixZTlab/tele_robot}},
   year         = {2024},
   note         = {Accessed: 2026-02}
 }

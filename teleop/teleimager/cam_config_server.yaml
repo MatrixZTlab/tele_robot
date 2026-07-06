@@ -46,6 +46,6 @@ head_camera:
   #   - type "opencv":    supports video_id, serial_number, physical_path
   #   - type "uvc":       supports video_id, serial_number, physical_path
   #   - type "orbbec":    supports video_id, serial_number, physical_path
-  video_id: 10
+  video_id: 2
   serial_number: CP2G853000D1
   physical_path: null

@@ -1,34 +1,13 @@
 <div align="center">
-  <h1 align="center">xr_teleoperate</h1>
+  <h1 align="center">tele_robot</h1>
   <p align="center">
     <a href="README.md"> English </a> | <a href="README_zh-CN.md">中文</a> | <a>日本語</a>
   </p>
 </div>
 
-# 📺 デモ動画
-
-<p align="center">
-  <table>
-    <tr>
-      <td align="center" width="50%">
-        <a href="https://www.youtube.com/watch?v=OTWHXTu09wE" target="_blank">
-          <img src="https://img.youtube.com/vi/OTWHXTu09wE/maxresdefault.jpg" alt="Video 1" width="75%">
-        </a>
-        <p><b> G1 (29DoF) + Dex3-1 </b></p>
-      </td>
-      <td align="center" width="50%">
-        <a href="https://www.youtube.com/watch?v=pNjr2f_XHoo" target="_blank">
-          <img src="https://img.youtube.com/vi/pNjr2f_XHoo/maxresdefault.jpg" alt="Video 2" width="75%">
-        </a>
-        <p><b> H1_2 (Arm 7DoF) </b></p>
-      </td>
-    </tr>
-  </table>
-</p>
-
 # 🔖 更新内容
 
-1. **Vuerライブラリをアップグレード**し、より多くのXRデバイスモードに対応しました。これに伴い、プロジェクト名を **`avp_teleoperate`** から **`xr_teleoperate`** に変更しました。従来の Apple Vision Pro に加え、**Meta Quest 3（コントローラー対応）** や **PICO 4 Ultra Enterprise（コントローラー対応）** にも対応しています。
+1. **Vuerライブラリをアップグレード**し、より多くのXRデバイスモードに対応しました。従来の Apple Vision Pro に加え、**Meta Quest 3（コントローラー対応）** や **PICO 4 Ultra Enterprise（コントローラー対応）** にも対応しています。
 2. 一部の機能を**モジュール化**し、Gitサブモジュール（`git submodule`）を用いて管理・読み込みを行うことで、コード構造の明確化と保守性を向上させました。
 3. **ヘッドレスモード**、**運用モード**、**シミュレーションモード**を新たに追加し、起動パラメータの設定を最適化しました（第2.2節参照）。**シミュレーションモード**により、環境構成の検証やハードウェア故障の切り分けが容易になります。
 4. デフォルトの手指マッピングアルゴリズムを Vector から **DexPilot** に変更し、指先のつまみ動作の精度と操作性を向上させました。
@@ -57,31 +36,15 @@
     <th align="center">⚪ ステータス</th>
   </tr>
   <tr>
-    <td align="center">G1 (29 DoF)</td>
+    <td align="center">TOPSTAR_H1</td>
     <td align="center">✅ 実装済み</td>
   </tr>
   <tr>
-    <td align="center">G1 (23 DoF)</td>
+    <td align="center">TOPSTAR_H2</td>
     <td align="center">✅ 実装済み</td>
   </tr>
   <tr>
-    <td align="center">H1 (4自由度アーム)</td>
-    <td align="center">✅ 実装済み</td>
-  </tr>
-  <tr>
-    <td align="center">H1_2 (7自由度アーム)</td>
-    <td align="center">✅ 実装済み</td>
-  </tr>
-  <tr>
-    <td align="center">Dex1‑1グリッパー</td>
-    <td align="center">✅ 実装済み</td>
-  </tr>
-  <tr>
-    <td align="center">Dex3‑1多指ハンド</td>
-    <td align="center">✅ 実装済み</td>
-  </tr>
-  <tr>
-    <td align="center">Inspire多指ハンド</td>
+    <td align="center">吸盤（Suction Cup）</td>
     <td align="center">✅ 実装済み</td>
   </tr>
   <tr>
@@ -93,7 +56,7 @@
 
 # 1. 📦 インストール
 
-Ubuntu 20.04と22.04でテスト済みです。他のOSでは設定が異なる場合があります。本ドキュメントでは、主に通常モードについて説明します。
+Ubuntu 22.04でテスト済みです。他のOSでは設定が異なる場合があります。本ドキュメントでは、主に通常モードについて説明します。
 
 詳細は[公式ドキュメント](
 
@@ -104,33 +67,31 @@ Ubuntu 20.04と22.04でテスト済みです。他のOSでは設定が異なる�
 (base) user@host:~$ conda create -n tv python=3.10 pinocchio=3.1.0 numpy=1.26.4 -c conda-forge
 (base) user@host:~$ conda activate tv
 # Clone this repo
-(tv) user@host:~$ git clone http://10.110.150.241:5656/zt_ai/robot_control/tele_robot
-(tv) user@host:~$ cd xr_teleoperate
+(tv) user@host:~$ git clone https://github.com/MatrixZTlab/tele_robot
+(tv) user@host:~$ cd tele_robot
 # Shallow clone submodule
-(tv) user@host:~/xr_teleoperate$ git submodule update --init --depth 1
+(tv) user@host:~/tele_robot$ git submodule update --init --depth 1
 # Install televuer submodule
-(tv) user@host:~/xr_teleoperate$ cd teleop/televuer
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ pip install -e .
+(tv) user@host:~/tele_robot$ cd teleop/televuer
+(tv) user@host:~/tele_robot/teleop/televuer$ pip install -e .
 # Generate the certificate files required for televuer submodule
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pem
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pem
 # Install dex-retargeting submodule
-(tv) user@host:~/xr_teleoperate/teleop/televuer$ cd ../robot_control/dex-retargeting/
-(tv) user@host:~/xr_teleoperate/teleop/robot_control/dex-retargeting$ pip install -e .
+(tv) user@host:~/tele_robot/teleop/televuer$ cd ../robot_control/dex-retargeting/
+(tv) user@host:~/tele_robot/teleop/robot_control/dex-retargeting$ pip install -e .
 # Install additional dependencies required by this repo
-(tv) user@host:~/xr_teleoperate/teleop/robot_control/dex-retargeting$ cd ../../../
-(tv) user@host:~/xr_teleoperate$ pip install -r requirements.txt
+(tv) user@host:~/tele_robot/teleop/robot_control/dex-retargeting$ cd ../../../
+(tv) user@host:~/tele_robot$ pip install -r requirements.txt
 ```
 
-## 1.2 🕹️ 通信SDK
+## 1.2 🕹️ TopstarSDK
 
 ```bash
 # ロボット通信用ライブラリインストール
 (tv) user@host:~$ git clone <your-sdk-url>
-(tv) user@host:~$ cd 通信SDK
-(tv) user@host:~/通信SDK$ pip install -e .
+(tv) user@host:~$ cd TopstarSDK
+(tv) user@host:~/TopstarSDK$ pip install -e .
 ```
-
-> **注1**: 元のh1_2ブランチのdds_wrapperは暫定版でした。現在は公式Python制御ライブラリ通信SDKに移行済みです。
 >
 > **注2**: コマンド前の識別子は「どのデバイスでどのディレクトリで実行するか」を示しています。
 >
@@ -149,12 +110,12 @@ Ubuntu 20.04と22.04でテスト済みです。他のOSでは設定が異なる�
 
 まずrobot_sim_isaaclabをインストールし、READMEに従って設定します。
 
-G1(29 DoF)とDex3ハンド構成でシミュレーションを起動:
+シミュレーションを起動:
 
 ```bash
 (base) user@host:~$ conda activate robot_sim_env
-(robot_sim_env) user@host:~$ cd ~/robot_sim_isaaclab
-(robot_sim_env) user@host:~/robot_sim_isaaclab$ python sim_main.py --device cpu --enable_cameras --task Isaac-PickPlace-Cylinder-G129-Dex3-Joint --enable_dex3_dds --robot_type g129
+(robot_sim_env) user@host:~$ cd ~/robot_sim
+(robot_sim_env) user@host:~/robot_sim$ python sim_main.py --device cpu --enable_cameras
 ```
 
 シミュレーション起動後、ウィンドウをクリックして有効化。ターミナルに`controller started, start main loop...`と表示されます。
@@ -171,9 +132,11 @@ G1(29 DoF)とDex3ハンド構成でシミュレーションを起動:
 
 | ⚙️ パラメータ |                📜 説明                |                         🔘 オプション                         | 📌 デフォルト |
 | :----------: | :----------------------------------: | :----------------------------------------------------------: | :----------: |
-| `--xr-mode`  |           XR入力モード選択           | `hand` (**ハンドトラッキング**) `controller` (**コントローラートラッキング**) |    `hand`    |
-|   `--arm`    | ロボットアームタイプ選択 (0. 📖 参照) |                 `G1_29` `G1_23` `H1_2` `H1`                  |   `G1_29`    |
-|    `--ee`    |   エンドエフェクタ選択 (0. 📖 参照)   |                   `dex1` `dex3` `inspire1`                   |     none     |
+| `--input-mode`  |           XR入力モード選択           | `hand` (**ハンドトラッキング**) `controller` (**コントローラートラッキング**) |    `hand`    |
+|   `--robot`    | ロボットアームタイプ選択 (0. 📖 参照) |                 `TOPSTAR_H1` `TOPSTAR_H2`                  |   `TOPSTAR_H1`    |
+|  `--control-mode`   |       制御モード選択（腕/頭/胴体）       |     `arms_only` `arms_head` `arms_head_torso` `full_body`      |   `arms_head`    |
+|    `--ee`    |   エンドエフェクタ選択 (0. 📖 参照)   |                   `suction_cup`                   |     none     |
+|    `--arm-scale`    |   腕のリーチ倍率（例：0.8）    |        任意の浮動小数点数         |       `1.0`       |
 
 - **モードフラグ**
 
@@ -183,14 +146,18 @@ G1(29 DoF)とDex3ハンド構成でシミュレーションを起動:
 |  `--motion`  | **モーション制御有効化**: 遠隔操作中に独立したロボット制御を許可。<br />ハンドモードではR3リモコンで歩行、コントローラーモードではジョイスティックで歩行 |
 | `--headless` |             GUIなしで実行（ヘッドレスPC2展開用）             |
 |   `--sim`    |               **シミュレーションモード**有効化               |
+|   `--ipc`    | **プロセス間通信モード**: IPCを介してtele_robotの状態制御を可能に |
+| `--affinity` | **CPUアフィニティモード**: CPUコアアフィニティ設定 |
+|  `--replay`  | **リプレイモード**: 記録済み軌道を再生。`--replay`（高速）または`--replay first`（低速/安全） |
+| `--replay-file` | リプレイする軌道JSONファイルのパス |
 
-G1(29 DoF) + Dex3でハンドトラッキング、シミュレーション、記録モードで起動:
+TOPSTAR_H2でシミュレーション、記録モードで起動:
 
 ```bash
-(tv) user@host:~$ cd ~/xr_teleoperate/teleop/
-(tv) user@host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --xr-mode=hand --arm=G1_29 --ee=dex3 --sim --record
-# 簡略化（デフォルト適用）:
-(tv) user@host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --record
+(tv) user@host:~$ cd ~/tele_robot/teleop/
+(tv) user@host:~/tele_robot/teleop/$ python teleop_hand_and_arm.py --robot=TOPSTAR_H2 --sim --record
+# 吸盤付き:
+(tv) user@host:~/tele_robot/teleop/$ python teleop_hand_and_arm.py --robot=TOPSTAR_H2 --ee=suction_cup --sim --record
 ```
 
 プログラム起動後、ターミナル表示:
@@ -232,7 +199,7 @@ Uplink task running. id:dbb8537d-a58c-4c57-b49d-cbb91bd25b90
 
 <p align="center">    </p>
 
-> **注1**: 記録データはデフォルトで`xr_teleoperate/teleop/utils/data`に保存。robot_IL_lerobotで使用方法を確認。
+> **注1**: 記録データはデフォルトで`teleop/utils/data`に保存。robot_IL_lerobotで使用方法を確認。
 > **注2**: データ記録時はディスク容量に注意してください。
 
 ## 2.3 🔚 終了
@@ -245,15 +212,13 @@ Uplink task running. id:dbb8537d-a58c-4c57-b49d-cbb91bd25b90
 
 ## 3.1 🖼️ 画像サービス
 
-`xr_teleoperate/teleop/image_server`ディレクトリの`image_server.py`をロボット(G1/H1/H1_2など)の**開発用計算ユニットPC2**にコピーし。
+`tele_robot/teleop/teleimager`の画像サービスプログラムをロボット(TOPSTAR_H1/TOPSTAR_H2など)の**開発用計算ユニットPC2**に設定。
 
 ```bash
-# 補足: scpコマンドでimage_server.pyをPC2に転送後、sshでPC2にリモートログインして実行可能
-# 開発用計算ユニットPC2のIPが192.168.123.164の場合の転送手順:
-# SSHでPC2にログインし、画像サーバー用フォルダ作成
-(tv) user@host:~$ ssh user@192.168.123.164 "mkdir -p ~/image_server"
-# ローカルのimage_server.pyをPC2の~/image_serverディレクトリにコピー
-(tv) user@host:~$ scp ~/xr_teleoperate/teleop/image_server/image_server.py user@192.168.123.164:~/image_server/
+# SSHでPC2にログイン
+(tv) user@host:~$ ssh user@192.168.123.164 "mkdir -p ~/teleimager"
+# teleimagerのインストールはteleimagerリポジトリのREADMEを参照
+(tv) user@host:~$ scp ~/tele_robot/teleop/televuer/key.pem ~/tele_robot/teleop/televuer/cert.pem user@192.168.123.164:~/teleimager/
 ```
 
 **PC2**で以下を実行:
@@ -271,34 +236,10 @@ user@pc2:~/image_server$ python image_server.py
 画像サービス起動後、**Host**ターミナルで`image_client.py`を使用して通信テスト可能:
 
 ```bash
-(tv) user@host:~/xr_teleoperate/teleop/image_server$ python image_client.py
+(tv) user@host:~/tele_robot/teleop/teleimager/src$ python -m teleimager.image_client --host 192.168.123.164
 ```
 
-## 3.2 ✋ Inspireハンドサービス（オプション）
-
-> **Note 1**: Skip this if your config does not use the Inspire hand.
-> **Note 2**: For the G1 robot with [Inspire DFX hand](
-> **Note 3**: For [Inspire FTP hand]((
-
-多指ハンド開発を参照して関連環境を設定し、制御プログラムをコンパイル。このURLから多指ハンド制御インターフェースプログラムをダウンロードし、ロボットの**PC2**にコピー。
-
-ロボットの**PC2**で以下を実行:
-
-```bash
-user@pc2:~$ sudo apt install libboost-all-dev libspdlog-dev
-# プロジェクトビルド
-user@pc2:~$ cd h1_inspire_service & mkdir build & cd build
-user@pc2:~/h1_inspire_service/build$ cmake .. -DCMAKE_BUILD_TYPE=Release
-user@pc2:~/h1_inspire_service/build$ make
-# ターミナル1. h1 inspireハンドサービス実行
-user@pc2:~/h1_inspire_service/build$ sudo ./inspire_hand -s /dev/ttyUSB0
-# ターミナル2. サンプル実行
-user@pc2:~/h1_inspire_service/build$ ./h1_hand_example
-```
-
-両手が連続的に開閉すれば成功。成功後、ターミナル2の`./h1_hand_example`プログラムを終了。
-
-## 3.3 🚀 起動
+## 3.2 🚀 起動
 
 > ![Warning](https://img.shields.io/badge/Warning-Important-red)
 >
@@ -315,7 +256,7 @@ user@pc2:~/h1_inspire_service/build$ ./h1_hand_example
 
 シミュレーションと同じですが、上記の安全警告に従ってください。
 
-## 3.4 🔚 終了
+## 3.3 🔚 終了
 
 > ![Warning](https://img.shields.io/badge/Warning-Important-red)
 >
@@ -329,16 +270,12 @@ user@pc2:~/h1_inspire_service/build$ ./h1_hand_example
 # 4. 🗺️ コード構成
 
 ```
-xr_teleoperate/
+tele_robot/
 │
 ├── assets                    [ロボットURDF関連ファイル格納]
 │
-├── hardware                  [3Dプリントハードウェアモジュール]
-│
 ├── teleop
-│   ├── image_server
-│   │     ├── image_client.py      [ロボット画像サーバーから画像データを受信]
-│   │     ├── image_server.py      [カメラから画像をキャプチャしネットワーク送信（ロボットの開発用計算ユニットPC2で実行）]
+│   ├── teleimager            [画像サービスライブラリ、複数の機能をサポート]
 │   │
 │   ├── televuer
 │   │      ├── src/televuer
@@ -353,8 +290,7 @@ xr_teleoperate/
 │   │      ├── robot_arm_ik.py     [アームの逆運動学]
 │   │      ├── robot_arm.py        [両腕関節を制御し他をロック]
 │   │      ├── hand_retargeting.py [多指ハンドリターゲティングアルゴリズムラッパー]
-│   │      ├── robot_hand_inspire.py  [inspireハンド関節を制御]
-│   │      ├── robot_hand.py  [ハンド関節を制御]
+│   │      ├── robot_hand.py  [ハンド/吸盤関節を制御]
 │   │
 │   ├── utils
 │   │      ├── episode_writer.py          [模倣学習用データ記録]
@@ -406,4 +342,4 @@ xr_teleoperate/
 6. https://github.com/meshcat-dev/meshcat-python
 7. https://github.com/zeromq/pyzmq
 8. https://github.com/Dingry/BunnyVisionPro
-9. 
+10. https://github.com/unitreerobotics/xr_teleoperate

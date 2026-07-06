@@ -26,22 +26,22 @@ import queue as _queue
 from sshkeyboard import listen_keyboard, stop_listening
 
 # -----------------------------------------------------------------------
-# Sim body movement helpers (used when --sim --motion --input-mode controller)
+# 底盘缓动工具 — 来自 jog GUI (h1_upper_body_jog.py)
 # -----------------------------------------------------------------------
-class LowPassFilter:
-    """Simple low-pass filter with optional per-step acceleration clamping."""
-    def __init__(self, alpha=0.15):
-        self.alpha = alpha
-        self._value = 0.0
-        self._last_value = 0.0
+def _step_toward(current: float, target: float, accel_step: float, decel_step: float) -> float:
+    """每帧向目标值渐进一步，加速/减速步长独立。"""
+    if current == target:
+        return current
+    same_direction = (current == 0.0) or (target == 0.0) or ((current > 0.0) == (target > 0.0))
+    speeding_up = same_direction and (abs(target) > abs(current))
+    step = accel_step if speeding_up else decel_step
+    delta = target - current
+    if delta > step:
+        return current + step
+    if delta < -step:
+        return current - step
+    return target
 
-    def update(self, new_value, max_accel=1.5):
-        delta = new_value - self._last_value
-        delta = max(-max_accel, min(max_accel, delta))
-        filtered = self.alpha * (self._last_value + delta) + (1 - self.alpha) * self._value
-        self._last_value = filtered
-        self._value = filtered
-        return self._value
 
 def _map_xr_axis_smooth(normalized, deadzone=0.05, output_min=-1.0, output_max=1.0):
     """Map normalised thumbstick value [-1,1] to [output_min, output_max] with dead-zone
@@ -59,15 +59,7 @@ def _map_xr_axis_smooth(normalized, deadzone=0.05, output_min=-1.0, output_max=1
         smooth = 6*t**5 - 15*t**4 + 10*t**3
         return output_min * smooth  # output_min is negative, result in [output_min, 0]
 
-def _map_xr_height(normalized, deadzone=0.05, offset_min=-0.7):
-    """Map thumbstick displacement (any direction) to a height offset in [offset_min, 0].
-    Larger displacement = more crouch."""
-    if abs(normalized) < deadzone:
-        return 0.0
-    t = (abs(normalized) - deadzone) / (1.0 - deadzone)
-    t = max(0.0, min(1.0, t))
-    smooth = 6*t**5 - 15*t**4 + 10*t**3
-    return min(0.0, offset_min * smooth)
+
 
 
 def _require_non_empty_state(name, value):
@@ -107,6 +99,27 @@ RIGHT_ARM_ACTIVE = False
 _right_a_press_start = 0.0
 _right_a_long_press_triggered = False
 
+# ── 底盘控制（独立于 TELEOP_ACTIVE，模仿 jog GUI）──
+MOTION_ACTIVE = False          # --motion 启动时设为 True
+_base_tgt_vx = 0.0
+_base_tgt_vy = 0.0
+_base_tgt_wz = 0.0
+_base_cur_vx = 0.0
+_base_cur_vy = 0.0
+_base_cur_wz = 0.0
+_base_last_t = 0.0            # 上次缓动时间戳
+
+# ── Torso 俯仰（由 control_mode.solve_torso 控制）──
+_torso_pitch_target = 0.0      # XR 右摇杆 Y → Torso pitch (hw rad)
+
+# 键盘 WASDQE 按键状态（True=按住）
+KEY_W = False
+KEY_A = False
+KEY_S = False
+KEY_D = False
+KEY_Q = False
+KEY_E = False
+
 # Edge-detection prev states for relative_pose mode buttons
 _prev_left_a_relative  = False
 _prev_right_a_relative = False
@@ -124,17 +137,35 @@ _prev_right_a_relative = False
 
 def on_press(key):
     global STOP, TELEOP_ACTIVE, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE
-    if key == 'r':
-        if not TELEOP_ACTIVE:
-            tv_wrapper.capture_init_head_pose()
-            TELEOP_ACTIVE = True
-    elif key == 'q':
+    global _base_tgt_vx, _base_tgt_vy, _base_tgt_wz, KEY_W, KEY_A, KEY_S, KEY_D, KEY_Q, KEY_E
+    # ── 键盘底盘控制（按住时持续移动）──
+    # 注意: 'q' 兼顾左转+退出；优先退出（未激活遥操时），激活时左转
+    if MOTION_ACTIVE and key not in ('q',):
+        if key == 'w':
+            KEY_W = True; _update_base_from_keyboard(); return
+        elif key == 's':
+            KEY_S = True; _update_base_from_keyboard(); return
+        elif key == 'a':
+            KEY_A = True; _update_base_from_keyboard(); return
+        elif key == 'd':
+            KEY_D = True; _update_base_from_keyboard(); return
+        elif key == 'e':
+            KEY_E = True; _update_base_from_keyboard(); return
+    # 'q' 的 quit 功能优先；仅当遥操激活时兼作左转
+    if key == 'q':
         if TELEOP_ACTIVE:
+            if MOTION_ACTIVE:
+                KEY_Q = True; _update_base_from_keyboard()
             TELEOP_ACTIVE = False
             logger_mp.info("🟡 Teleop stopped. Press 'q' again to exit.")
         else:
             STOP = True
             logger_mp.info("🔴 Exiting program...")
+        return
+    if key == 'r':
+        if not TELEOP_ACTIVE:
+            tv_wrapper.capture_init_head_pose()
+            TELEOP_ACTIVE = True
     elif key == 'm':
         if not TELEOP_ACTIVE:
             TELEOP_MODE = "relative_pose" if TELEOP_MODE == "relative_head" else "relative_head"
@@ -142,6 +173,7 @@ def on_press(key):
                 tv_wrapper.reset_wrist_refs()
                 LEFT_ARM_ACTIVE = False
                 RIGHT_ARM_ACTIVE = False
+                robot.reset_relative_pose_state('both')
             logger_mp.info(f"🔄 Teleop mode switched to: {TELEOP_MODE}")
         else:
             logger_mp.warning("Cannot switch mode while teleop is active. Stop teleop first.")
@@ -179,6 +211,147 @@ def on_press(key):
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
 
+
+def on_release(key):
+    """按键释放回调 — 用于键盘底座控制松开即停。"""
+    global _base_tgt_vx, _base_tgt_vy, _base_tgt_wz, KEY_W, KEY_A, KEY_S, KEY_D, KEY_Q, KEY_E
+    if not MOTION_ACTIVE:
+        return
+    changed = False
+    if key == 'w' and KEY_W:
+        KEY_W = False; changed = True
+    elif key == 's' and KEY_S:
+        KEY_S = False; changed = True
+    elif key == 'a' and KEY_A:
+        KEY_A = False; changed = True
+    elif key == 'd' and KEY_D:
+        KEY_D = False; changed = True
+    elif key == 'q' and KEY_Q:
+        KEY_Q = False; changed = True
+    elif key == 'e' and KEY_E:
+        KEY_E = False; changed = True
+    if changed:
+        _update_base_from_keyboard()
+
+
+def _update_base_from_keyboard():
+    """根据当前按键状态计算底盘目标速度（方向 × body_max_speed，对齐 jog GUI）。"""
+    global _base_tgt_vx, _base_tgt_vy, _base_tgt_wz
+    if not MOTION_ACTIVE:
+        _base_tgt_vx = _base_tgt_vy = _base_tgt_wz = 0.0
+        return
+    vx = 0.0
+    if KEY_W:
+        vx += 1.0
+    if KEY_S:
+        vx += -1.0
+    vy = 0.0
+    if KEY_A:
+        vy += 1.0
+    if KEY_D:
+        vy += -1.0
+    wz = 0.0
+    if KEY_Q:
+        wz += 1.0
+    if KEY_E:
+        wz += -1.0
+    _base_tgt_vx = vx * args.body_max_speed
+    _base_tgt_vy = vy * args.body_max_speed
+    _base_tgt_wz = wz * args.body_max_speed
+
+
+def _publish_base_cmd(tele_data=None):
+    """发布底盘 Twist 指令 — 独立于 TELEOP_ACTIVE，受 --motion 控制。
+
+    设计模仿 jog GUI：
+      1. 键盘/XR 设定目标速度（_base_tgt_*）
+      2. 每帧 _step_toward 从当前速度向目标速度缓动
+      3. 发布缓动后的速度到 /base_cmd
+    """
+    global _base_tgt_vx, _base_tgt_vy, _base_tgt_wz
+    global _base_cur_vx, _base_cur_vy, _base_cur_wz, _base_last_t
+
+    if not MOTION_ACTIVE:
+        return
+    try:
+        arm_ctrl
+    except NameError:
+        return
+
+    now = time.monotonic()
+    dt = now - _base_last_t if _base_last_t > 0 else (1.0 / args.frequency)
+    _base_last_t = now
+    dt = max(0.001, min(dt, 0.1))
+
+    # ── XR 摇杆 → 覆盖键盘目标（仅方向，幅值由 body_max_speed 缩放）──
+    if tele_data is not None and args.input_mode == "controller":
+        try:
+            has_ls = getattr(tele_data, 'left_ctrl_thumbstick', False)
+            has_rs = getattr(tele_data, 'right_ctrl_thumbstick', False)
+        except Exception:
+            has_ls = has_rs = False
+        if has_ls or has_rs:
+            xr_vx = 0.0; xr_vy = 0.0; xr_wz = 0.0
+            if has_ls:
+                ls = getattr(tele_data, 'left_ctrl_thumbstickValue', [0.0, 0.0])
+                # _map_xr_axis_smooth 返回 [-1, 1] 方向，乘以 body_max_speed 得幅值
+                xr_vx = _map_xr_axis_smooth(-ls[1], 0.05, -1.0, 1.0) * args.body_max_speed
+                xr_vy = _map_xr_axis_smooth(-ls[0], 0.05, -1.0, 1.0) * args.body_max_speed
+            if has_rs:
+                rs = getattr(tele_data, 'right_ctrl_thumbstickValue', [0.0, 0.0])
+                xr_wz = _map_xr_axis_smooth(-rs[0], 0.05, -1.0, 1.0) * args.body_max_speed
+            if abs(xr_vx) > 0.01 or abs(xr_vy) > 0.01 or abs(xr_wz) > 0.01:
+                _base_tgt_vx, _base_tgt_vy, _base_tgt_wz = xr_vx, xr_vy, xr_wz
+
+    # ── _step_toward 缓动（硬编码常量，对齐 jog GUI）──
+    _LIN_ACCEL = 0.8; _LIN_DECEL = 1.2
+    _ANG_ACCEL = 1.5; _ANG_DECEL = 2.0
+    lin_accel_step = _LIN_ACCEL * dt
+    lin_decel_step = _LIN_DECEL * dt
+    ang_accel_step = _ANG_ACCEL * dt
+    ang_decel_step = _ANG_DECEL * dt
+    _base_cur_vx = _step_toward(_base_cur_vx, _base_tgt_vx, lin_accel_step, lin_decel_step)
+    _base_cur_vy = _step_toward(_base_cur_vy, _base_tgt_vy, lin_accel_step, lin_decel_step)
+    _base_cur_wz = _step_toward(_base_cur_wz, _base_tgt_wz, ang_accel_step, ang_decel_step)
+
+    # ── 发布 Twist ──
+    if hasattr(arm_ctrl, '_ros_node') and hasattr(arm_ctrl._ros_node, 'publish_base_cmd'):
+        arm_ctrl._ros_node.publish_base_cmd(_base_cur_vx, _base_cur_vy, _base_cur_wz)
+
+
+def _publish_torso_cmd(tele_data=None):
+    """发布 Torso 俯仰到 LowCmd slot 1 — 仅当 control_mode.solve_torso=True 时激活。
+
+    右摇杆 Y 轴 → torso_pitch，经 arm_ctrl.ctrl_torso() → _publish_loop 限速后写入 LowCmd。
+    """
+    global _torso_pitch_target
+    if not control_mode.solve_torso:
+        return
+    try:
+        arm_ctrl
+    except NameError:
+        return
+    if not hasattr(arm_ctrl, 'ctrl_torso'):
+        return
+
+    if tele_data is not None and args.input_mode == "controller":
+        try:
+            has_rs = getattr(tele_data, 'right_ctrl_thumbstick', False)
+        except Exception:
+            has_rs = False
+        if has_rs:
+            rs = getattr(tele_data, 'right_ctrl_thumbstickValue', [0.0, 0.0])
+            # _map_xr_axis_smooth 返回 [-1, 1] 方向，映射到 torso_pitch_max
+            pitch = _map_xr_axis_smooth(-rs[1], 0.05, -1.65806279, 1.65806279)
+            _torso_pitch_target = pitch if abs(pitch) > 0.001 else 0.0
+        else:
+            _torso_pitch_target = 0.0
+    else:
+        _torso_pitch_target = 0.0
+
+    arm_ctrl.ctrl_torso([0.0, _torso_pitch_target])
+
+
 def get_state() -> dict:
     """Return current heartbeat state"""
     global TELEOP_ACTIVE, STOP, READY, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE
@@ -209,9 +382,10 @@ if __name__ == '__main__':
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
-    parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
+    parser.add_argument('--motion', action='store_true',
+                        help='Enable chassis / base movement control (keyboard WASDQE or XR controller thumbsticks)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
-    parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
+    parser.add_argument('--sim', action='store_true', help='Enable simulation mode (passed to RobotDriver, does NOT control body)')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # replay options
@@ -224,15 +398,9 @@ if __name__ == '__main__':
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
     parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
-    # sim body movement velocity/height limits (only active when --sim --motion --input-mode controller)
-    # conservative example: --body-x-vel-max 0.3 --body-x-vel-min -0.3 --body-y-vel-max 0.3 --body-yaw-vel-max 0.3
-    # sim reference range (matching send_commands_8bit.py): x:[-0.6,1.0] y:[-0.5,0.5] yaw:[-1.57,1.57] height_base:0.8 offset:[-0.7,0]
-    parser.add_argument('--body-x-vel-max',          type=float, default=1.0,  help='[sim] max forward  velocity for body movement (m/s)')
-    parser.add_argument('--body-x-vel-min',          type=float, default=-0.6, help='[sim] max backward velocity for body movement (m/s, negative)')
-    parser.add_argument('--body-y-vel-max',          type=float, default=0.5,  help='[sim] max lateral  velocity for body movement (m/s)')
-    parser.add_argument('--body-yaw-vel-max',        type=float, default=1.57, help='[sim] max yaw      velocity for body movement (rad/s)')
-    parser.add_argument('--body-height-base',        type=float, default=0.8,  help='[sim] base body height (m)')
-    parser.add_argument('--body-height-offset-min',  type=float, default=-0.7, help='[sim] max crouch offset below base height (m, negative)')
+    # ── Body / Chassis 运动参数（依赖 --motion，对齐 jog GUI）──
+    parser.add_argument('--body-max-speed',         type=float, default=1.0,  help='Global speed scaling factor (0~1), like jog GUI slider')
+    # ── 其他 ──
     parser.add_argument('--arm-scale', type=float, default=1.0, help='Arm reach scaling factor (e.g., 0.8)')
 
     args = parser.parse_args()
@@ -267,7 +435,8 @@ if __name__ == '__main__':
         else:
             listen_keyboard_thread = threading.Thread(
                 target=listen_keyboard,
-                kwargs={"on_press": on_press, "until": None, "sequential": False},
+                kwargs={"on_press": on_press, "on_release": on_release,
+                         "until": None, "sequential": False},
                 daemon=True,
             )
             listen_keyboard_thread.start()
@@ -338,15 +507,10 @@ if __name__ == '__main__':
                 except psutil.AccessDenied:
                     pass
 
-        # simulation mode
-        if args.sim:
-            if args.motion and args.input_mode == "controller":
-                _body_filters = {
-                    'x_vel':   LowPassFilter(alpha=0.15),
-                    'y_vel':   LowPassFilter(alpha=0.15),
-                    'yaw_vel': LowPassFilter(alpha=0.15),
-                    'height':  LowPassFilter(alpha=0.15),
-                }
+        # ── Motion 模式初始化 ──
+        MOTION_ACTIVE = args.motion
+        if args.motion:
+            _base_last_t = time.monotonic()
 
         # record + headless / non-headless mode
         if args.record:
@@ -636,6 +800,7 @@ if __name__ == '__main__':
                                 tv_wrapper.reset_wrist_refs()
                                 LEFT_ARM_ACTIVE = False
                                 RIGHT_ARM_ACTIVE = False
+                                robot.reset_relative_pose_state('both')
                             logger_mp.info(f"🔄 Right A long press: Teleop mode switched to: {TELEOP_MODE}")
                         tv_wrapper._prev_right_ctrl_aButton = True
                     else:
@@ -670,6 +835,7 @@ if __name__ == '__main__':
                                     pass
                                 LEFT_ARM_ACTIVE = True
                                 TELEOP_ACTIVE = True
+                                robot.reset_relative_pose_state('right')
                                 logger_mp.info("XR Left A/X: Left hand → Right arm activated")
                             tv_wrapper._prev_left_ctrl_aButton = True
                         else:
@@ -683,6 +849,7 @@ if __name__ == '__main__':
                                 pass
                             RIGHT_ARM_ACTIVE = True
                             TELEOP_ACTIVE = True
+                            robot.reset_relative_pose_state('left')
                             logger_mp.info("XR Right A: Right hand → Left arm activated")
 
                     # ── 等待循环中支持录制控制 ──
@@ -728,6 +895,11 @@ if __name__ == '__main__':
                         robot._prev_ee_state = robot.handler_registry.dispatch_trigger_squeeze(
                             tele_data, robot._prev_ee_state, swap_sides=swap,
                         )
+
+                    # ── 等待循环中持续发布底盘 & Torso 指令（独立于 TELEOP_ACTIVE）──
+                    _publish_base_cmd(tele_data)
+                    _publish_torso_cmd(tele_data)
+
                 except Exception:
                     pass
                 # 打印等待循环中的 TELEOP_ACTIVE/STOP 状态，便于调试
@@ -810,6 +982,7 @@ if __name__ == '__main__':
                             RIGHT_ARM_ACTIVE = False
                             TELEOP_ACTIVE = False
                             tv_wrapper.reset_wrist_refs()
+                            robot.reset_relative_pose_state('both')
                             tv_wrapper.reset_init_head_pose()
                             logger_mp.info("🔄 Right A long press: Switched to relative_head mode")
                     tv_wrapper._prev_right_ctrl_aButton = True
@@ -863,6 +1036,7 @@ if __name__ == '__main__':
                                 except Exception:
                                     pass
                                 LEFT_ARM_ACTIVE = True
+                                robot.reset_relative_pose_state('right')
                                 logger_mp.info("XR Left A/X: Left hand → Right arm ACTIVATED")
                         tv_wrapper._prev_left_ctrl_aButton = True
                     else:
@@ -880,6 +1054,7 @@ if __name__ == '__main__':
                             except Exception:
                                 pass
                             RIGHT_ARM_ACTIVE = True
+                            robot.reset_relative_pose_state('left')
                             logger_mp.info("XR Right A: Right hand → Left arm ACTIVATED")
 
                     # ── Derive TELEOP_ACTIVE from arm activation ──
@@ -925,28 +1100,9 @@ if __name__ == '__main__':
                 else:
                     tv_wrapper._prev_right_ctrl_bButton = False
 
-                # ── Body movement (sim+motion+controller 模式) ──
-                if args.input_mode == "controller" and args.motion:
-                    if args.sim:
-                        # sim mode: publish body movement via DDS to rt/run_command/cmd
-                        # format consumed by action_provider_wh_dds.py: [x_vel, y_vel, yaw_vel, height]
-                        if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
-                            # soft emergency stop: send zero velocities, reset to base height
-                            cmd_list = [0.0, 0.0, 0.0, args.body_height_base]
-                        else:
-                            x_raw   = _map_xr_axis_smooth(-tele_data.left_ctrl_thumbstickValue[1],  0.05, args.body_x_vel_min,       args.body_x_vel_max)
-                            y_raw   = _map_xr_axis_smooth(-tele_data.left_ctrl_thumbstickValue[0],  0.05, -args.body_y_vel_max,       args.body_y_vel_max)
-                            yaw_raw = _map_xr_axis_smooth(-tele_data.right_ctrl_thumbstickValue[0], 0.05, -args.body_yaw_vel_max,     args.body_yaw_vel_max)
-                            h_raw   = _map_xr_height(      tele_data.right_ctrl_thumbstickValue[1], 0.05, args.body_height_offset_min)
-                            x_vel    = _body_filters['x_vel'].update(x_raw,    max_accel=0.2)
-                            y_vel    = _body_filters['y_vel'].update(y_raw,    max_accel=0.2)
-                            yaw_vel  = _body_filters['yaw_vel'].update(yaw_raw, max_accel=0.5)
-                            h_offset = _body_filters['height'].update(h_raw,   max_accel=0.02)
-                            cmd_list = [x_vel, y_vel, yaw_vel, args.body_height_base + h_offset]
-
-                        if hasattr(arm_ctrl, '_ros_node') and hasattr(arm_ctrl._ros_node, 'publish_base_cmd'):
-                            arm_ctrl._ros_node.publish_base_cmd(cmd_list[0], cmd_list[1], cmd_list[2])
-                        logger_mp.debug(f"sim body cmd: {cmd_list}")
+                # ── 底盘 & Torso 控制（独立于 TELEOP_ACTIVE，依赖 --motion）──
+                _publish_base_cmd(tele_data)
+                _publish_torso_cmd(tele_data)
 
                 # ── 统一控制管线（RobotDriver）──
                 recording_snapshot = robot.step(tele_data)
@@ -999,6 +1155,15 @@ if __name__ == '__main__':
                 logger_mp.debug(f"main process sleep: {sleep_time}")
 
         # ======== 退出遥操作后的清理 ========
+        # 底盘归零
+        if MOTION_ACTIVE:
+            try:
+                if hasattr(arm_ctrl, '_ros_node') and hasattr(arm_ctrl._ros_node, 'publish_base_cmd'):
+                    arm_ctrl._ros_node.publish_base_cmd(0.0, 0.0, 0.0)
+                    logger_mp.info("Base velocity reset to zero.")
+            except Exception:
+                pass
+
         # 自动停止可能仍在进行的 ServoJ 录制
         if args.record:
             try:
