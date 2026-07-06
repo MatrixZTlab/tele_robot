@@ -23,6 +23,7 @@ import numpy as np
 import yaml
 import time
 import threading
+import pickle
 import signal
 import functools
 import subprocess
@@ -940,6 +941,7 @@ class BaseCamera:
         self._cam_topic = cam_topic
         self._img_shape = img_shape # (H, W)
         self._fps = fps
+        self._last_timestamp_ns = None
         self._enable_zmq = enable_zmq
         self._zmq_port = zmq_port
         if self._enable_zmq:
@@ -987,6 +989,9 @@ class BaseCamera:
         """Return a depth frame as bytes, or None if not supported. 
            Before call this function, must first call get_frame() to update the latest depth data."""
         return None
+
+    def get_last_timestamp_ns(self):
+        return self._last_timestamp_ns
 
     def get_zmq_port(self):
         """Return the zmq port number the camera is serving on."""
@@ -1059,6 +1064,7 @@ class OrbbecCamera(BaseCamera):
     
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames(1000)
+        self._last_timestamp_ns = time.time_ns()
         color_frame = frames.get_color_frame()
         if not color_frame:
             return None
@@ -1077,7 +1083,19 @@ class OrbbecCamera(BaseCamera):
         if self._enable_zmq:
             ok, buf = cv2.imencode(".jpg", bgr_numpy)
             if ok:
-                self._zmq_buffer.write(buf.tobytes())
+                jpg_bytes = buf.tobytes()
+                if self._enable_depth and self._latest_depth is not None:
+                    payload = {
+                        "type": "rgbd",
+                        "timestamp_ns": self._last_timestamp_ns,
+                        "jpg": jpg_bytes,
+                        "depth": self._latest_depth.tobytes(),
+                        "depth_shape": list(self._latest_depth.shape),
+                        "depth_dtype": str(self._latest_depth.dtype),
+                    }
+                    self._zmq_buffer.write(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
+                else:
+                    self._zmq_buffer.write(jpg_bytes)
         
         if not self._ready.is_set():
             self._ready.set()
@@ -1435,6 +1453,7 @@ class ImageServer:
                     cam_type = "isaacsim"
                 img_shape = cam_cfg.get("image_shape", None)
                 fps = cam_cfg.get("fps", 30)
+                enable_depth = cam_cfg.get("enable_depth", False)
                 video_id = cam_cfg.get("video_id", "0")
                 video_path = f"/dev/video{video_id}" if video_id else None
                 physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
@@ -1480,7 +1499,8 @@ class ImageServer:
                         logger_mp.error(f"[Image Server] Cannot find RealSenseCamera for {cam_topic}")
                     else:
                         self._cameras[cam_topic] = RealSenseCamera(cam_topic, serial_number, img_shape, fps,
-                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                   enable_depth=enable_depth)
                 
                 elif cam_type == "orbbec":
                     if not self._orbbec_enable:
@@ -1491,7 +1511,8 @@ class ImageServer:
                         logger_mp.error(f"[Image Server] Cannot find OrbbecCamera for {cam_topic}")
                     else:
                         self._cameras[cam_topic] = OrbbecCamera(cam_topic, serial_number, img_shape, fps,
-                                                                enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                enable_depth=enable_depth)
 
                 elif cam_type == "uvc":
                     uid = None

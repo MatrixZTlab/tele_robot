@@ -11,7 +11,9 @@ import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 
 class EpisodeWriter():
-    def __init__(self, task_dir, task_goal=None, task_desc = None, task_steps = None, frequency=30, image_size=[640, 480], rerun_log = True):
+    def __init__(self, task_dir, task_goal=None, task_desc = None, task_steps = None,
+                 frequency=30, image_size=[640, 480], rerun_log = True,
+                 tolerance_s=1e-4):
         """
         image_size: [width, height]
         """
@@ -29,8 +31,9 @@ class EpisodeWriter():
         if task_steps is not None:
             self.text['steps'] = task_steps
 
-        self.frequency = frequency
+        self.frequency = float(frequency)
         self.image_size = image_size
+        self.tolerance_s = float(tolerance_s)
 
         self.rerun_log = rerun_log
         if self.rerun_log:
@@ -68,6 +71,13 @@ class EpisodeWriter():
                 "version": "1.0.0" if version is None else version, 
                 "date": datetime.date.today().strftime('%Y-%m-%d') if date is None else date,
                 "author": "unitree" if author is None else author,
+                "fps": self.frequency,
+                "tolerance_s": self.tolerance_s,
+                "alignment": {
+                    "scheme": "lerobot_fps_grid",
+                    "timestamp_formula": "timestamp = frame_index / fps",
+                    "actual_sensor_timestamps": "stored per frame under alignment.actual_timestamps_ns",
+                },
                 "image": {"width":self.image_size[0], "height":self.image_size[1], "fps":self.frequency},
                 "depth": {"width":self.image_size[0], "height":self.image_size[1], "fps":self.frequency},
                 "audio": {"sample_rate": 16000, "channels": 1, "format":"PCM", "bits":16},    # PCM_S16
@@ -126,12 +136,18 @@ class EpisodeWriter():
         logger_mp.info(f"==> New episode created: {self.episode_dir}")
         return True  # Return True if the episode is successfully created
         
-    def add_item(self, colors, depths=None, states=None, actions=None, tactiles=None, audios=None, sim_state=None):
+    def add_item(self, colors, depths=None, states=None, actions=None, tactiles=None,
+                 audios=None, sim_state=None, alignment=None):
         # Increment the item ID
         self.item_id += 1
+        frame_index = self.item_id
+        timestamp = frame_index / self.frequency if self.frequency > 0 else 0.0
         # Create the item data dictionary
         item_data = {
             'idx': self.item_id,
+            'frame_index': frame_index,
+            'timestamp': timestamp,
+            'episode_index': self.episode_id,
             'colors': colors,
             'depths': depths,
             'states': states,
@@ -139,6 +155,7 @@ class EpisodeWriter():
             'tactiles': tactiles,
             'audios': audios,
             'sim_state': sim_state,
+            'alignment': alignment or {},
         }
         # Enqueue the item data
         self.item_data_queue.put(item_data)
@@ -177,7 +194,7 @@ class EpisodeWriter():
         # Save depths
         if depths:
             for idx_depth, (depth_key, depth) in enumerate(depths.items()):
-                depth_name = f'{str(idx).zfill(6)}_{depth_key}.jpg'
+                depth_name = f'{str(idx).zfill(6)}_{depth_key}.png'
                 if not cv2.imwrite(os.path.join(self.depth_dir, depth_name), depth):
                     logger_mp.info(f"Failed to save depth image.")
                 item_data['depths'][depth_key] = os.path.join('depths', depth_name)

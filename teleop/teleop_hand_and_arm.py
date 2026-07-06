@@ -233,6 +233,10 @@ if __name__ == '__main__':
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
     parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
+    parser.add_argument('--sync-tolerance-s', type=float, default=1e-4,
+                        help='LeRobot-style timestamp tolerance metadata for recorded samples')
+    parser.add_argument('--camera-sync-tolerance-s', type=float, default=0.02,
+                        help='Maximum allowed software timestamp skew between camera frames')
     # sim body movement velocity/height limits (only active when --sim --motion --input-mode controller)
     # conservative example: --body-x-vel-max 0.3 --body-x-vel-min -0.3 --body-y-vel-max 0.3 --body-yaw-vel-max 0.3
     # sim reference range (matching send_commands_8bit.py): x:[-0.6,1.0] y:[-0.5,0.5] yaw:[-1.57,1.57] height_base:0.8 offset:[-0.7,0]
@@ -285,6 +289,8 @@ if __name__ == '__main__':
         # ── image client（headless 模式跳过，使用默认配置）──
         img_client = None
         head_img = None
+        left_wrist_img = None
+        right_wrist_img = None
         if args.headless:
             camera_config = {
                 'head_camera': {
@@ -293,7 +299,9 @@ if __name__ == '__main__':
                     'enable_zmq': False,
                     'enable_webrtc': False,
                     'webrtc_port': 0,
-                }
+                },
+                'left_wrist_camera': {'enable_zmq': False},
+                'right_wrist_camera': {'enable_zmq': False},
             }
             logger_mp.info("🖥️  Headless mode — no image server, using defaults")
             args.display_mode = 'pass-through'  # headless 无需沉浸模式
@@ -400,6 +408,7 @@ if __name__ == '__main__':
                     task_steps=args.task_steps,
                     frequency=args.frequency,
                     image_size=episode_image_size,
+                    tolerance_s=args.sync_tolerance_s,
                     rerun_log=not args.headless,
                 )
             except Exception:
@@ -781,12 +790,11 @@ if __name__ == '__main__':
                         head_img = img_client.get_head_frame()
                     if xr_need_local_img:
                         tv_wrapper.render_to_xr(head_img)
-                # if camera_config['left_wrist_camera']['enable_zmq']:
-                #     if args.record:
-                #         left_wrist_img = img_client.get_left_wrist_frame()
-                # if camera_config['right_wrist_camera']['enable_zmq']:
-                #     if args.record:
-                #         right_wrist_img = img_client.get_right_wrist_frame()
+                if args.record and img_client is not None:
+                    if camera_config.get('left_wrist_camera', {}).get('enable_zmq', False):
+                        left_wrist_img = img_client.get_left_wrist_frame()
+                    if camera_config.get('right_wrist_camera', {}).get('enable_zmq', False):
+                        right_wrist_img = img_client.get_right_wrist_frame()
 
                 # record mode
                 if args.record and RECORD_TOGGLE:
@@ -987,20 +995,48 @@ if __name__ == '__main__':
                         logger_mp.debug(f"sim body cmd: {cmd_list}")
 
                 # ── 统一控制管线（RobotDriver）──
+                control_cycle_timestamp_ns = time.time_ns()
                 recording_snapshot = robot.step(tele_data)
+                robot_step_done_timestamp_ns = time.time_ns()
 
                 # ── 录制（机器人无关）──
                 if args.record and getattr(recorder_manager.recorder, '_servo_recording', False):
                     try:
                         colors = {}
                         depths = {}
+                        camera_timestamps_ns = {}
                         if camera_config['head_camera']['binocular']:
                             if head_img is not None:
                                 colors[f"color_{0}"] = head_img.bgr[:, :camera_config['head_camera']['image_shape'][1]//2]
                                 colors[f"color_{1}"] = head_img.bgr[:, camera_config['head_camera']['image_shape'][1]//2:]
+                                if getattr(head_img, 'timestamp_ns', None) is not None:
+                                    camera_timestamps_ns["color_0"] = head_img.timestamp_ns
+                                    camera_timestamps_ns["color_1"] = head_img.timestamp_ns
+                                if getattr(head_img, 'depth', None) is not None:
+                                    _head_depth = head_img.depth
+                                    depths[f"depth_{0}"] = _head_depth[:, :camera_config['head_camera']['image_shape'][1]//2]
+                                    depths[f"depth_{1}"] = _head_depth[:, camera_config['head_camera']['image_shape'][1]//2:]
                         else:
                             if head_img is not None:
                                 colors[f"color_{0}"] = head_img.bgr
+                                if getattr(head_img, 'timestamp_ns', None) is not None:
+                                    camera_timestamps_ns["color_0"] = head_img.timestamp_ns
+                                if getattr(head_img, 'depth', None) is not None:
+                                    depths[f"depth_{0}"] = head_img.depth
+                        next_color_idx = len(colors)
+                        if left_wrist_img is not None and getattr(left_wrist_img, 'bgr', None) is not None:
+                            colors[f"color_{next_color_idx}"] = left_wrist_img.bgr
+                            if getattr(left_wrist_img, 'timestamp_ns', None) is not None:
+                                camera_timestamps_ns[f"color_{next_color_idx}"] = left_wrist_img.timestamp_ns
+                            if getattr(left_wrist_img, 'depth', None) is not None:
+                                depths[f"depth_{next_color_idx}"] = left_wrist_img.depth
+                            next_color_idx += 1
+                        if right_wrist_img is not None and getattr(right_wrist_img, 'bgr', None) is not None:
+                            colors[f"color_{next_color_idx}"] = right_wrist_img.bgr
+                            if getattr(right_wrist_img, 'timestamp_ns', None) is not None:
+                                camera_timestamps_ns[f"color_{next_color_idx}"] = right_wrist_img.timestamp_ns
+                            if getattr(right_wrist_img, 'depth', None) is not None:
+                                depths[f"depth_{next_color_idx}"] = right_wrist_img.depth
 
                         # 构建 states/actions（与 RobotDriver._collect_recording_state 对齐）
                         left_arm_state = recording_snapshot.get("left_arm_state", [])
@@ -1025,10 +1061,38 @@ if __name__ == '__main__':
                             "right_ee": {"qpos": [], "qvel": [], "torque": []},
                             "body": {"qpos": body_action},
                         }
+                        camera_ts_values = list(camera_timestamps_ns.values())
+                        camera_sync_skew_s = None
+                        if camera_ts_values:
+                            camera_sync_skew_s = (
+                                max(camera_ts_values) - min(camera_ts_values)
+                            ) / 1_000_000_000.0
+                        alignment = {
+                            "scheme": "lerobot_fps_grid",
+                            "fps": args.frequency,
+                            "tolerance_s": args.sync_tolerance_s,
+                            "camera_sync_tolerance_s": args.camera_sync_tolerance_s,
+                            "actual_timestamps_ns": {
+                                "control_cycle": control_cycle_timestamp_ns,
+                                "robot_step_done": robot_step_done_timestamp_ns,
+                                "cameras": camera_timestamps_ns,
+                            },
+                            "camera_sync_skew_s": camera_sync_skew_s,
+                            "camera_sync_within_tolerance": (
+                                None if camera_sync_skew_s is None
+                                else camera_sync_skew_s <= args.camera_sync_tolerance_s
+                            ),
+                        }
                         # TODO: 回写 sim_state
 
                         if 'episode_writer' in globals() and episode_writer is not None:
-                            episode_writer.add_item(colors=colors, states=states, actions=actions)
+                            episode_writer.add_item(
+                                colors=colors,
+                                depths=depths,
+                                states=states,
+                                actions=actions,
+                                alignment=alignment,
+                            )
                     except Exception:
                         logger_mp.exception("Failed to record trajectory data")
                         raise

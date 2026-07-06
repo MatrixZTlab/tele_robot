@@ -49,3 +49,40 @@ head_camera:
   video_id: 10
   serial_number: CP2G853000D1
   physical_path: null
+
+# =====================================================
+# Left wrist camera configuration
+# =====================================================
+  enable_depth: true
+left_wrist_camera:
+  enable_zmq: true
+  zmq_port : 55556
+  enable_webrtc: false
+  webrtc_port : 60002
+  webrtc_codec: h264
+  type: orbbec
+  image_shape: [480, 640]
+  binocular: false
+  fps: 30
+  video_id: null
+  serial_number: CV2L360000D4
+  physical_path: null
+
+# =====================================================
+# Right wrist camera configuration
+# =====================================================
+  enable_depth: true
+right_wrist_camera:
+  enable_zmq: true
+  zmq_port : 55557
+  enable_webrtc: false
+  webrtc_port: 60003
+  webrtc_codec: h264
+  type: orbbec
+  image_shape: [480, 640]
+  binocular: false
+  fps: 30
+  video_id: null
+  serial_number: CV2L360000C0
+  physical_path: null
+  enable_depth: true
