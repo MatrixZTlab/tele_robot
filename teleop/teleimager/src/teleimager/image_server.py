@@ -37,6 +37,9 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, R
 from aiortc.rtcrtpsender import RTCRtpSender
 from aiortc.contrib.media import MediaRelay
 from aiortc.codecs import h264
+h264.DEFAULT_BITRATE = 1_800_000   # 默认 1.8 Mbps (原 1 Mbps)
+h264.MIN_BITRATE    = 1_000_000    # 最低 1 Mbps (原 500 Kbps)
+h264.MAX_BITRATE    = 3_000_000   # 最高 3 Mbps (原 3 Mbps)
 import av
 import ssl
 from pathlib import Path
@@ -75,6 +78,8 @@ KEY_PEM_PATH = KEY_PEM_PATH.resolve()
 # libx264 for Jetson (Patch h264 Encoder)
 # ========================================================
 def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
+    # ⏱️ 验证码率
+    # print(f"[BITRATE] target_bitrate={getattr(self, 'target_bitrate', 'N/A')} bps, frame={frame.width}x{frame.height}, force_keyframe={force_keyframe}")
     if self.codec and (frame.width != self.codec.width or frame.height != self.codec.height):
         self.codec = None
 
@@ -263,8 +268,6 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
         self._pts = 0
 
     async def recv(self) -> av.VideoFrame:
-        # This will suspend execution until a frame is available
-        # preventing CPU busy-waiting
         frame = await self._queue.get()
         return frame
 
@@ -296,7 +299,7 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
         target_loop = loop or asyncio.get_event_loop()
         if target_loop.is_closed():
             return
-            
+
         def _put():
             try:
                 # Drop old frame if queue is full (Low Latency strategy)
@@ -434,6 +437,16 @@ class WebRTC_PublisherThread(threading.Thread):
 
         await pc.setRemoteDescription(offer)
         answer = await pc.createAnswer()
+
+        lines = answer.sdp.split('\n')
+        new_sdp = []
+        for line in lines:
+            if line.startswith('b=AS'):
+                new_sdp.append('b=AS:1800')
+            else:
+                new_sdp.append(line)
+        answer.sdp = '\n'.join(new_sdp)
+
         await pc.setLocalDescription(answer)
 
         return web.Response(

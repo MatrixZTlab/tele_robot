@@ -1,31 +1,9 @@
 <div align="center">
-  <h1 align="center"> xr_teleoperate </h1>
+  <h1 align="center"> tele_robot </h1>
   <p align="center">
     <a href="README.md"> English </a> | <a>中文</a> | <a href="README_ja-JP.md">日本語</a>
   </p>
 </div>
-
-
-# 📺 视频演示
-
-<p align="center">
-  <table>
-    <tr>
-      <td align="center" width="50%">
-        <a href="https://www.bilibili.com/video/BV124m8YXExJ" target="_blank">
-          <img src="./img/video_cover.jpg" alt="Video 1" width="75%">
-        </a>
-        <p><b> G1 (29自由度) + Dex3-1</b></p>
-      </td>
-      <td align="center" width="50%">
-        <a href="https://www.bilibili.com/video/BV1SW421X7kA" target="_blank">
-          <img src="./img/video_cover2.jpg" alt="Video 2" width="75%">
-        </a>
-        <p><b> H1_2 (手臂7自由度) </b></p>
-      </td>
-    </tr>
-  </table>
-</p>
 
 
 # 🔖 [版本说明](CHANGELOG_zh-CN.md)
@@ -66,19 +44,7 @@
     <td style="text-align: center;"> &#9989; 完成 </td>
   </tr>
   <tr>
-    <td style="text-align: center;"> Dex1-1 夹爪 </td>
-    <td style="text-align: center;"> &#9989; 完成 </td>
-  </tr>
-  <tr>
-    <td style="text-align: center;"> Dex3-1 灵巧手 </td>
-    <td style="text-align: center;"> &#9989; 完成 </td>
-  </tr>
-  <tr>
-    <td style="text-align: center;"> 因时灵巧手 </td>
-    <td style="text-align: center;"> &#9989; 完成 </td>
-  </tr>
-  <tr>
-    <td style="text-align: center;"> <a href="https://www.brainco-hz.com/docs/revolimb-hand/" target="_blank"> 强脑灵巧手 </td>
+    <td style="text-align: center;"> 吸盘（Suction Cup） </td>
     <td style="text-align: center;"> &#9989; 完成 </td>
   </tr>
   <tr>
@@ -91,7 +57,7 @@
 
 # 1. 📦 安装
 
-我们在 Ubuntu 20.04 和 Ubuntu 22.04 上测试了我们的代码，其他操作系统可能需要不同的配置。本文档主要介绍常规模式。
+我们在 Ubuntu 22.04 上测试了我们的代码，其他操作系统可能需要不同的配置。本文档主要介绍常规模式。
 
 有关更多信息，您可以参考 [OpenTeleVision](https://github.com/OpenTeleVision/TeleVision)。
 
@@ -102,73 +68,75 @@
 (base) user@host:~$ conda create -n tv python=3.10 pinocchio=3.1.0 numpy=1.26.4 -c conda-forge
 (base) user@host:~$ conda activate tv
 # 克隆本仓库
-(tv) user@host:~$ git clone http://10.110.150.241:5656/zt_ai/robot_control/tele_robot
-(tv) user@host:~$ cd <your-repo-dir>
+(tv) user@host:~$ git clone https://github.com/MatrixZTlab/tele_robot
+(tv) user@host:~$ cd tele_robot
 # 浅克隆子模块
-(tv) user@host:~$ git submodule update --init --depth 1
+(tv) user@host:~/tele_robot$ git submodule update --init --depth 1
 ```
 
 ```bash
 # 安装 teleimager 模块
-(tv) user@host:~/teleop/teleimager$ cd teleop/teleimager
-(tv) user@host:~/teleop/teleimager$ pip install -e . --no-deps
+(tv) user@host:~/tele_robot$ cd teleop/teleimager
+(tv) user@host:~/tele_robot/teleop/teleimager$ pip install -e . --no-deps
 ```
 
 ```bash
 # 安装 televuer 模块
-(tv) user@host:~/teleop/televuer$ cd teleop/televuer
-(tv) user@host:~/teleop/televuer$ pip install -e .
+(tv) user@host:~/tele_robot$ cd teleop/televuer
+(tv) user@host:~/tele_robot/teleop/televuer$ pip install -e .
 # 为 televuer 模块配置 SSL 证书，以便 XR 设备（如 Pico / Quest / Apple Vision Pro）通过 HTTPS / WebRTC 安全连接
 # 1. 生成证书文件
 # 1.1 如果您使用 pico / quest 等 xr 设备
-(tv) user@host:~/teleop/televuer$ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pem
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pem
 # 1.2 如果您使用 apple vision pro 设备
-(tv) user@host:~/teleop/televuer$ openssl genrsa -out rootCA.key 2048
-(tv) user@host:~/teleop/televuer$ openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 365 -out rootCA.pem -subj "/CN=xr-teleoperate"
-(tv) user@host:~/teleop/televuer$ openssl genrsa -out key.pem 2048
-(tv) user@host:~/teleop/televuer$ openssl req -new -key key.pem -out server.csr -subj "/CN=localhost"
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl genrsa -out rootCA.key 2048
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 365 -out rootCA.pem -subj "/CN=tele-robot"
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl genrsa -out key.pem 2048
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl req -new -key key.pem -out server.csr -subj "/CN=localhost"
   ## 创建 server_ext.cnf 文件，输入以下内容（IP.2 地址应与您的 主机 IP 地址匹配，假设此处地址为 192.168.123.2。可以使用 `ifconfig` 等类似命令查询）
-(tv) user@host:~/teleop/televuer$ vim server_ext.cnf
+(tv) user@host:~/tele_robot/teleop/televuer$ vim server_ext.cnf
 subjectAltName = @alt_names
 [alt_names]
 DNS.1 = localhost
 IP.1 = 192.168.123.164
 IP.2 = 192.168.123.2
-(tv) user@host:~/teleop/televuer$ openssl x509 -req -in server.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out cert.pem -days 365 -sha256 -extfile server_ext.cnf
-(tv) user@host:~/teleop/televuer$ ls
+(tv) user@host:~/tele_robot/teleop/televuer$ openssl x509 -req -in server.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out cert.pem -days 365 -sha256 -extfile server_ext.cnf
+(tv) user@host:~/tele_robot/teleop/televuer$ ls
 build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA.pem  rootCA.srl  server.csr  server_ext.cnf  src  test
 # 通过 AirDrop 将 rootCA.pem 复制到 Apple Vision Pro 并安装它
 
 # 开启防火墙
-(tv) user@host:~/teleop/televuer$ sudo ufw allow 8012
+(tv) user@host:~/tele_robot/teleop/televuer$ sudo ufw allow 8012
 
 # 2. 配置证书路径，以下方式任选其一
 # 2.1 用户配置目录（可选）
-(tv) user@host:~/teleop/televuer$ mkdir -p ~/.config/xr_teleoperate/
-(tv) user@host:~/teleop/televuer$ cp cert.pem key.pem ~/.config/xr_teleoperate/
+(tv) user@host:~/tele_robot/teleop/televuer$ mkdir -p ~/.config/tele_robot/
+(tv) user@host:~/tele_robot/teleop/televuer$ cp cert.pem key.pem ~/.config/tele_robot/
 # 2.2 环境变量配置（可选）
-(tv) user@host:~/teleop/televuer$ echo 'export XR_TELEOP_CERT="$HOME/.config/xr_teleoperate/cert.pem"' >> ~/.bashrc
-(tv) user@host:~/teleop/televuer$ echo 'export XR_TELEOP_KEY="$HOME/.config/xr_teleoperate/key.pem"' >> ~/.bashrc
-(tv) user@host:~/teleop/televuer$ source ~/.bashrc
+(tv) user@host:~/tele_robot/teleop/televuer$ echo 'export XR_TELEOP_CERT="$HOME/.config/tele_robot/cert.pem"' >> ~/.bashrc
+(tv) user@host:~/tele_robot/teleop/televuer$ echo 'export XR_TELEOP_KEY="$HOME/.config/tele_robot/key.pem"' >> ~/.bashrc
+(tv) user@host:~/tele_robot/teleop/televuer$ source ~/.bashrc
 ```
 
 ```bash
 # 安装 dex-retargeting 模块
-(tv) user@host:~/teleop/televuer$ cd ../robot_control/dex-retargeting/
-(tv) user@host:~/teleop/robot_control/dex-retargeting$ pip install -e .
+(tv) user@host:~/tele_robot/teleop/televuer$ cd ../robot_control/dex-retargeting/
+(tv) user@host:~/tele_robot/teleop/robot_control/dex-retargeting$ pip install -e .
 ```
 
 ```bash
 # 安装本仓库所需的其他依赖库
-(tv) user@host:~/teleop/robot_control/dex-retargeting$ cd ../../../
+(tv) user@host:~/tele_robot/teleop/robot_control/dex-retargeting$ cd ../../../
 (tv) user@host:~$ pip install -r requirements.txt
 ```
 
-## 1.2 🕹️ Robot Communication SDK
+## 1.2 🕹️ TopstarSDK
 
 ```bash
-# 安装机器人通信控制库
-(tv) user@host:~$ pip install <your-communication-sdk>
+# 安装 TopstarSDK 机器人通信控制库
+(tv) user@host:~$ git clone <your-sdk-url>.git
+(tv) user@host:~$ cd TopstarSDK
+(tv) user@host:~/TopstarSDK$ pip install -e .
 ```
 
 > 注意：命令前面的所有标识符是为了提示：该命令应该在哪个设备和目录下执行。
@@ -197,22 +165,27 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |     `--frequency`     |                     设置录制和控制的 FPS                     |                    任意正常范围内的浮点数                    |       30.0        |
 |    `--input-mode`     |          选择 XR 输入模式（通过什么方式控制机器人）          |   `hand`（**手势跟踪**）<br />`controller`（**手柄跟踪**）   |      `hand`       |
 |   `--display-mode`    |        选择 XR 显示模式（通过什么方式查看机器人视角）        | `immersive`（沉浸式）<br />`ego`（通透+第一人称小窗）<br />`pass-through`（通透） |    `immersive`    |
-|        `--arm`        |            选择机器人设备类型（可参考 0. 📖 介绍）            |          `G1_29`<br />`G1_23`<br />`H1_2`<br />`H1`          |      `G1_29`      |
-|        `--ee`         |       选择手臂的末端执行器设备类型（可参考 0. 📖 介绍）       | `dex1`<br />`dex3`<br />`inspire_ftp`<br />`inspire_dfx`<br />`brainco` |     无默认值      |
+|        `--robot`        |            选择机器人设备类型（可参考 0. 📖 介绍）            |          `TOPSTAR_H1`<br />`TOPSTAR_H2`          |    `TOPSTAR_H1`    |
+|  `--control-mode`   |       选择控制模式（手臂/头部/躯干）       |     `arms_only`<br />`arms_head`<br />`arms_head_torso`<br />`full_body`      |   `arms_head`    |
+|        `--ee`         |       选择手臂的末端执行器设备类型（可参考 0. 📖 介绍）       | `suction_cup` |     无默认值      |
 |   `--img-server-ip`   | 设置图像服务器的 IP 地址，用于接收图像服务流、配置 WebRTC 信令服务地址 |                         `IPv4` 地址                          | `192.168.123.164` |
 | `--network-interface` |                设置 cyclonedds 通信的网卡接口                |                           网卡名称                           |      `None`       |
+|    `--arm-scale`    |   手臂伸展比例因子（如 0.8）    |        任意浮点数         |       `1.0`       |
 
 - 模式开关参数
 
 |    ⚙️ 参数    |                            📜 说明                            |
 | :----------: | :----------------------------------------------------------: |
-|  `--motion`  | 【启用**运动控制**模式】<br />开启本模式后，可在机器人运控程序运行下进行遥操作程序。<br />**手势跟踪**模式下，可使用 [R3遥控器]() 控制机器人正常行走；**手柄跟踪**模式下，也可使用[手柄摇杆控制机器人行走]()。<br />注意：只支持 `Regular mode` (R1+X)，不支持 `Running mode` (R2+A) |
+|  `--motion`  | 【启用**运动控制**模式】<br />开启本模式后，可在机器人运控程序运行下进行遥操作程序。<br />**手势跟踪**模式下，可使用 R3遥控器 控制机器人正常行走；**手柄跟踪**模式下，也可使用手柄摇杆控制机器人行走。<br />注意：只支持 `Regular mode` (R1+X)，不支持 `Running mode` (R2+A) |
 | `--headless` | 【启用**无图形界面**模式】<br />适用于本程序部署在开发计算单元（PC2）等无显示器情况 |
-|   `--sim`    | 【启用[**仿真模式**](<sim-link>)】 |
-|   `--ipc`    | 【进程间通信模式】<br />可通过进程间通信来控制 xr_teleoperate 程序的状态切换，此模式适合与代理程序进行交互 |
+|   `--sim`    | 【启用**仿真模式**】 |
+|   `--ipc`    | 【进程间通信模式】<br />可通过进程间通信来控制 tele_robot 程序的状态切换，此模式适合与代理程序进行交互 |
 | `--affinity` | 【CPU亲和模式】<br />设置 CPU 核心亲和性。如果你不知道这是什么，那么请不要设置它。 |
 |  `--record`  | 【启用**数据录制**模式】<br />按 **r** 键进入遥操后，按 **s** 键可开启数据录制，再次按 **s** 键可结束录制并保存本次 episode 数据。<br />继续按下 **s** 键可重复前述过程。 |
+|  `--replay`  | 【**回放模式**】<br />回放录制的轨迹。使用 `--replay`（快速）或 `--replay first`（慢速/安全）。需要配合 `--replay-file` 参数。 |
+| `--replay-file` | 回放的轨迹 JSON 文件路径 |
 |  `--task-*`  | 此类参数可配置录制的文件保存路径，任务目标、描述、步骤等信息 |
+| `--body-*`   | 在仿真+手柄模式下配置身体移动速度和高度限制参数 |
 
 
 ## 1.4 🔄 状态转移图
@@ -232,12 +205,12 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 
 首先，请安装 [robot_sim](<sim-link>)。具体安装步骤，可参考该仓库 README 文档。
 
-其次，启动 robot_sim 仿真环境。假设使用 G1(29 DoF) 和 Dex3 灵巧手配置进行仿真，则启动命令示例如下：
+其次，启动 robot_sim 仿真环境：
 
 ```bash
 (base) user@host:~$ conda activate robot_sim_env
 (robot_sim_env) user@host:~$ cd ~/robot_sim
-(robot_sim_env) user@host:~/robot_sim$ python sim_main.py --device cpu  --enable_cameras  --task  Isaac-PickPlace-Cylinder-G129-Dex3-Joint --enable_dex3_dds --robot_type g129
+(robot_sim_env) user@host:~/robot_sim$ python sim_main.py --device cpu --enable_cameras
 ```
 
 💥💥💥 请注意❗
@@ -260,15 +233,13 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 
 本程序支持通过 XR 设备（比如手势或手柄）来控制实际机器人动作，也支持在虚拟仿真中运行。你可以根据需要，通过命令行参数来配置运行方式。
 
-根据 1.3 节参数说明以及仿真环境配置，我们假设选择**手势跟踪**来控制 G1(29 DoF) + Dex3 灵巧手设备，同时开启仿真模式和数据录制模式。
-
-则启动命令如下所示：
+以 TOPSTAR_H2 在仿真模式下录制备吸盘为例：
 
 ```bash
-(tv) user@host:~$ cd ~/xr_teleoperate/teleop/
-(tv) user@host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --xr-mode=hand --arm=G1_29 --ee=dex3 --sim --record
-# 实际上，由于一些参数存在默认值，该命令也可简化为：
-(tv) user@host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --record
+(tv) user@host:~$ cd ~/tele_robot/teleop/
+(tv) user@host:~/tele_robot/teleop/$ python teleop_hand_and_arm.py --robot=TOPSTAR_H2 --sim --record
+# 带吸盘：
+(tv) user@host:~/tele_robot/teleop/$ python teleop_hand_and_arm.py --robot=TOPSTAR_H2 --ee=suction_cup --sim --record
 ```
 
 程序正常启动后，终端输出信息如下图所示：
@@ -337,7 +308,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
      </a>
    </p>
 
-8. 最后，在终端中按下 **r** 键后，正式开启遥操作程序。此时，您可以远程控制机器人的手臂（和灵巧手）
+8. 最后，在终端中按下 **r** 键后，正式开启遥操作程序。此时，您可以远程控制机器人的手臂。
 
 9. 在遥操过程中，按 **s** 键可开启数据录制，再次按 **s** 键可结束录制并保存数据（该过程可重复）
 
@@ -349,7 +320,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
      </a>
    </p>
 
-> 注意1：录制的数据默认存储在 `xr_teleoperate/teleop/utils/data` 中。数据使用说明见此仓库： [robot_IL](<lerobot-link>/blob/main/README_zh.md#%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86%E4%B8%8E%E8%BD%AC%E6%8D%A2)。
+> 注意1：录制的数据默认存储在 `teleop/utils/data` 中。数据使用说明见此仓库： [robot_IL](<lerobot-link>/blob/main/README_zh.md#%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86%E4%B8%8E%E8%BD%AC%E6%8D%A2)。
 >
 > 注意2：请在录制数据时注意您的硬盘空间大小。
 >
@@ -369,7 +340,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 
 仿真环境中已经自动开启了图像服务。实物部署时，需要针对自身相机硬件类型，手动开启图像服务。步骤如下：
 
-1. 在机器人机器人（G1/H1/H1_2 等）的 **开发计算单元 PC2** 中安装图像服务程序
+1. 在机器人（TOPSTAR_H1/TOPSTAR_H2 等）的 **开发计算单元 PC2** 中安装图像服务程序
 
 ```bash
 # ssh登录PC2，下载图像服务程序仓库
@@ -381,13 +352,13 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 2. 在**本地主机**上执行以下命令：
 
 ```bash
-# 将本地主机 xr_teleoperate/teleop/televuer 路径下在 1.1 节配置的 key.pem 和 cert.pem 文件拷贝到 PC2 对应路径
+# 将本地主机 tele_robot/teleop/televuer 路径下在 1.1 节配置的 key.pem 和 cert.pem 文件拷贝到 PC2 对应路径
 # 这两个文件是 teleimager 启动 WebRTC 服务时所必须的
-(tv) user@host:~$ scp ~/xr_teleoperate/teleop/televuer/key.pem ~/xr_teleoperate/teleop/televuer/cert.pem user@192.168.123.164:~/teleimager
+(tv) user@host:~$ scp ~/tele_robot/teleop/televuer/key.pem ~/tele_robot/teleop/televuer/cert.pem user@192.168.123.164:~/teleimager
 # 根据 teleimager 仓库的 https://github.com/silencht/teleimager/blob/main/README.md 文档说明，在PC2配置证书路径，例如
 (teleimager) user@pc2:~$ cd teleimager
-(teleimager) user@pc2:~$ mkdir -p ~/.config/xr_teleoperate/
-(teleimager) user@pc2:~/teleimager$ cp cert.pem key.pem ~/.config/xr_teleoperate/
+(teleimager) user@pc2:~$ mkdir -p ~/.config/tele_robot/
+(teleimager) user@pc2:~/teleimager$ cp cert.pem key.pem ~/.config/tele_robot/
 ```
 
 3. 在**开发计算单元 PC2** 中按照 teleimager 文档配置 cam_config_server.yaml 并启动图像服务程序
@@ -401,53 +372,14 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 4. 在**本地主机**上执行以下命令订阅图像：
 
 ```bash
-(tv) user@host:~$ cd ~/xr_teleoperate/teleop/teleimager/src
-(tv) user@host:~/xr_teleoperate/teleop/teleimager/src$ python -m teleimager.image_client --host 192.168.123.164
+(tv) user@host:~$ cd ~/tele_robot/teleop/teleimager/src
+(tv) user@host:~/tele_robot/teleop/teleimager/src$ python -m teleimager.image_client --host 192.168.123.164
 # 如果设置了 WebRTC 图像流，那么可以在浏览器中通过 https://192.168.123.164:60001 打开网址，随后点击 Start 按钮进行测试 
 ```
 
 
 
-## 3.2 ✋ Inspire 手部服务（可选）
-
-> 注意1：如果选择的机器人配置中没有使用 Inspire 系列灵巧手，那么请忽略本节内容。
->
-> 注意2：如果选择的G1机器人配置，且使用 [Inspire DFX 灵巧手]((doc-link))，相关issue [#46]()。
->
-> 注意3：如果选择的机器人配置中使用了 [Inspire FTP 灵巧手]((doc-link))，相关issue [ #48]()。目前已经支持 FTP 灵巧手，请您查阅 `--ee` 参数。 
-
-首先，使用 [此链接: DFX_inspire_service](<dfx-link>) 克隆灵巧手控制接口程序，然后将其复制到机器人机器人的**PC2**。
-
-在机器人机器人的 **PC2** 上，执行命令：
-
-```bash
-user@pc2:~$ sudo apt install libboost-all-dev libspdlog-dev
-# 构建项目
-user@pc2:~$ cd DFX_inspire_service && mkdir build && cd build
-user@pc2:~/DFX_inspire_service/build$ cmake ..
-user@pc2:~/DFX_inspire_service/build$ make -j6
-
-# （For robot g1）终端 1. 
-user@pc2:~/DFX_inspire_service/build$ sudo ./inspire_g1
-# 或（For robot h1）终端 1. 
-user@pc2:~/DFX_inspire_service/build$ sudo ./inspire_h1 -s /dev/ttyUSB0
-
-# 终端 2. 运行示例
-user@pc2:~/DFX_inspire_service/build$ ./hand_example
-```
-
-如果两只手连续打开和关闭，则表示成功。一旦成功，即可关闭终端 2 中的 `./hand_example` 程序。
-
-## 3.3 ✋ BrainCo 手部服务（可选）
-
-请参考[仓库文档](<brainco-link>)。
-
-## 3.4 ✋ Dex1_1 服务（可选）
-
-请参考[仓库文档](<dex1_1_service>)。
-
-
-## 3.5 🚀 启动遥操
+## 3.2 🚀 启动遥操
 
 >  ![Warning](https://img.shields.io/badge/Warning-Important-red)
 >
@@ -462,7 +394,7 @@ user@pc2:~/DFX_inspire_service/build$ ./hand_example
 
 与仿真部署基本一致，但要注意上述警告事项。
 
-## 3.6 🔚 退出
+## 3.3 🔚 退出
 
 >  ![Warning](https://img.shields.io/badge/Warning-Important-red)
 >
@@ -479,12 +411,12 @@ user@pc2:~/DFX_inspire_service/build$ ./hand_example
 # 4. 🗺️ 代码库教程
 
 ```
-xr_teleoperate/
+tele_robot/
 │
 ├── assets                    [存储机器人 URDF 相关文件]
 │
 ├── teleop
-│   ├── teleimager            [全新的图像服务库，支持多种特性]
+│   ├── teleimager            [图像服务库，支持多种特性]
 │   │
 │   ├── televuer
 │   │      ├── src/televuer
@@ -499,8 +431,7 @@ xr_teleoperate/
 │   │      ├── robot_arm_ik.py     [手臂的逆运动学]  
 │   │      ├── robot_arm.py        [控制双臂关节并锁定其他部分]
 │   │      ├── hand_retargeting.py [灵巧手映射算法库 Wrapper]
-│   │      ├── robot_hand_inspire.py  [控制因时灵巧手]
-│   │      ├── robot_hand.py  [控制机器人灵巧手]
+│   │      ├── robot_hand.py  [控制机器人灵巧手/吸盘]
 │   │
 │   ├── utils
 │   │      ├── episode_writer.py          [用于记录模仿学习的数据]  
@@ -510,7 +441,7 @@ xr_teleoperate/
 │   │      ├── motion_switcher.py         [用于切换运控状态]
 │   │      ├── sim_state_topic.py         [用于仿真部署]
 │   │
-│   │──teleop_hand_and_arm.py    [遥操作的启动执行代码]
+│   └── teleop_hand_and_arm.py    [遥操作的启动执行代码]
 ```
 
 
@@ -531,18 +462,18 @@ xr_teleoperate/
 6. https://github.com/meshcat-dev/meshcat-python
 7. https://github.com/zeromq/pyzmq
 8. https://github.com/Dingry/BunnyVisionPro
-9. <your-sdk-url>
-10. https://github.com/ARCLab-MIT/beavr-bot
+9. https://github.com/ARCLab-MIT/beavr-bot
+10. https://github.com/unitreerobotics/xr_teleoperate
 
 
 
 # 7. 📝 引用
 
 ```
-@misc{xr-teleoperate,
+@misc{tele-robot,
   author       = {{}},
-  title        = {{XR-Teleoperate}: An Open-Source Teleoperation Framework and Data Collection Toolkit for Embodied Intelligence},
-  howpublished = {\url{http://10.110.150.241:5656/zt_ai/robot_control/tele_robot}},
+  title        = {{Tele-Robot}: An Open-Source Teleoperation Framework and Data Collection Toolkit for Embodied Intelligence},
+  howpublished = {\url{https://github.com/MatrixZTlab/tele_robot}},
   year         = {2024},
   note         = {Accessed: 2026-02}
 }

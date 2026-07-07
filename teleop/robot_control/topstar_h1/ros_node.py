@@ -19,7 +19,7 @@ class H1RosNode(BaseRosNode):
         super().__init__(node_name='h1_arm_controller',
                          cmd_topic='/lowcmd',
                          state_topic='/lowstate')
-        self.base_cmd_pub = self.create_publisher(Twist, '/h1/base_cmd', 10)
+        self.base_cmd_pub = self.create_publisher(Twist, '/base_cmd', 10)
         self.movej_pub = self.create_publisher(ArmRequest, "/api/arm/request", 10)
         self._movej_req_id = 0
         self._gripper_right_pub = self.create_publisher(GripperCmd, '/hand/right/cmd', 10)

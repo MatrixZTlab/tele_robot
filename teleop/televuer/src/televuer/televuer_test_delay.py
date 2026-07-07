@@ -1,32 +1,14 @@
-import signal
-import socket
-import subprocess
 from vuer import Vuer
-from vuer.schemas import ImageBackground, Hands, MotionControllers, WebRTCVideoPlane, WebRTCStereoVideoPlane
+from vuer.schemas import ImageBackground, Hands, MotionControllers, WebRTCVideoPlane, WebRTCStereoVideoPlane, Html
 from multiprocessing import Value, Array, Process, shared_memory
 import numpy as np
 import asyncio
+import time
 import threading
 import cv2
 import os
 from pathlib import Path
 from typing import Literal
-
-
-def _free_port(host: str, port: int) -> None:
-    """尝试释放端口：若有进程占用则杀死，TIME_WAIT 状态不阻塞启动。"""
-    try:
-        result = subprocess.run(
-            ['lsof', '-ti', f':{port}'], capture_output=True, text=True, timeout=3.0
-        )
-        if result.stdout.strip():
-            for pid in result.stdout.strip().split('\n'):
-                try:
-                    os.kill(int(pid), signal.SIGKILL)
-                except (OSError, ValueError):
-                    pass
-    except Exception:
-        pass
 
 
 class TeleVuer:
@@ -107,9 +89,6 @@ class TeleVuer:
                     cert_file = cert_file or str(current_module_dir / "cert.pem")
                     key_file = key_file or str(current_module_dir / "key.pem")
 
-        # 清理上次残留的 Vuer 进程（若有），TIME_WAIT 由 Vuer 内部 SO_REUSEADDR 处理
-        _free_port('0.0.0.0', 8012)
-
         self.vuer = Vuer(host='0.0.0.0', cert=cert_file, key=key_file, queries=dict(grid=False), queue_len=3)
         self.vuer.add_handler("CAMERA_MOVE")(self.on_cam_move)
         if self.use_hand_tracking:
@@ -121,19 +100,14 @@ class TeleVuer:
         self.zmq = zmq
         self.webrtc = webrtc
         self.webrtc_url = webrtc_url
+        # ⏱️ WebRTC 计时器
+        self._timer_start = None
 
         if self.display_mode == "immersive":
             if self.webrtc:
                 fn = self.main_image_binocular_webrtc if self.binocular else self.main_image_monocular_webrtc
             elif self.zmq:
-                _shm_size = np.prod(self.img_shape) * np.uint8().itemsize
-                try:
-                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
-                except FileExistsError:
-                    # 上次异常退出残留，先清理再重建
-                    old = shared_memory.SharedMemory(name=None, create=False, size=_shm_size)
-                    old.unlink()
-                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
+                self.img2display_shm = shared_memory.SharedMemory(create=True, size=np.prod(self.img_shape) * np.uint8().itemsize)
                 self.img2display = np.ndarray(self.img_shape, dtype=np.uint8, buffer=self.img2display_shm.buf)
                 self.latest_frame = None
                 self.new_frame_event = threading.Event()
@@ -147,14 +121,7 @@ class TeleVuer:
             if self.webrtc:
                 fn = self.main_image_binocular_webrtc_ego if self.binocular else self.main_image_monocular_webrtc_ego
             elif self.zmq:
-                _shm_size = np.prod(self.img_shape) * np.uint8().itemsize
-                try:
-                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
-                except FileExistsError:
-                    # 上次异常退出残留，先清理再重建
-                    old = shared_memory.SharedMemory(name=None, create=False, size=_shm_size)
-                    old.unlink()
-                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
+                self.img2display_shm = shared_memory.SharedMemory(create=True, size=np.prod(self.img_shape) * np.uint8().itemsize)
                 self.img2display = np.ndarray(self.img_shape, dtype=np.uint8, buffer=self.img2display_shm.buf)
                 self.latest_frame = None
                 self.new_frame_event = threading.Event()
@@ -242,27 +209,8 @@ class TeleVuer:
         self.new_frame_event.set()
 
     def close(self):
-        # 1. stop writer thread first
-        if hasattr(self, "stop_writer_event"):
-            self.stop_writer_event.set()
-        # 2. gracefully shut down Vuer subprocess (SIGINT -> KeyboardInterrupt in _vuer_run)
-        if hasattr(self, "process") and self.process.is_alive():
-            try:
-                self.process.send_signal(signal.SIGINT)  # 优雅退出，让 Vuer 清理 socket
-                self.process.join(timeout=3.0)
-            except Exception:
-                pass
-            if self.process.is_alive():
-                # 兜底：SIGKILL 强制终止
-                self.process.kill()
-                self.process.join(timeout=1.0)
-        # 3. clean up shared memory
-        if hasattr(self, "img2display_shm"):
-            try:
-                self.img2display_shm.close()
-                self.img2display_shm.unlink()
-            except Exception:
-                pass
+        self.process.terminate()
+        self.process.join(timeout=0.5)
         if self.display_mode in ("immersive", "ego") and not self.webrtc:
             self.stop_writer_event.set()
             self.new_frame_event.set()
@@ -484,17 +432,33 @@ class TeleVuer:
                 to="bgChildren",
             )
 
+        if self._timer_start is None:
+            self._timer_start = time.perf_counter()
+
         while True:
+            elapsed = time.perf_counter() - self._timer_start
+            h = int(elapsed // 3600)
+            m = int((elapsed % 3600) // 60)
+            s = elapsed % 60
+            timer_str = f"{h:02d}:{m:02d}:{s:06.3f}"
+
             session.upsert(
-                WebRTCStereoVideoPlane(
-                    src=self.webrtc_url,
-                    iceServer=None,
-                    iceServers=[], 
-                    key="video-quad",
-                    aspect=self.aspect_ratio,
-                    height = 7,
-                    layout="stereo-left-right"
-                ),
+                [
+                    WebRTCStereoVideoPlane(
+                        src=self.webrtc_url,
+                        iceServer=None,
+                        iceServers=[], 
+                        key="video-quad",
+                        aspect=self.aspect_ratio,
+                        height = 7,
+                        layout="stereo-left-right"
+                    ),
+                    Html(
+                        f'<div style="color:#00ff00;font-family:monospace;font-size:48px;font-weight:bold;text-shadow:2px 2px 4px black;background:rgba(0,0,0,0.4);padding:6px 14px;border-radius:6px;">{timer_str}</div>',
+                        fullscreen=True,
+                        key="timer",
+                    ),
+                ],
                 to="bgChildren",
             )
             await asyncio.sleep(1.0 / self.display_fps)
@@ -521,16 +485,32 @@ class TeleVuer:
                 to="bgChildren",
             )
 
+        if self._timer_start is None:
+            self._timer_start = time.perf_counter()
+
         while True:
+            elapsed = time.perf_counter() - self._timer_start
+            h = int(elapsed // 3600)
+            m = int((elapsed % 3600) // 60)
+            s = elapsed % 60
+            timer_str = f"{h:02d}:{m:02d}:{s:06.3f}"
+
             session.upsert(
-                WebRTCVideoPlane(
-                    src=self.webrtc_url,
-                    iceServer=None,
-                    iceServers=[],
-                    key="video-quad",
-                    aspect=self.aspect_ratio,
-                    height = 7,
-                ),
+                [
+                    WebRTCVideoPlane(
+                        src=self.webrtc_url,
+                        iceServer=None,
+                        iceServers=[],
+                        key="video-quad",
+                        aspect=self.aspect_ratio,
+                        height = 7,
+                    ),
+                    Html(
+                        f'<div style="color:#00ff00;font-family:monospace;font-size:48px;font-weight:bold;text-shadow:2px 2px 4px black;background:rgba(0,0,0,0.4);padding:6px 14px;border-radius:6px;">{timer_str}</div>',
+                        fullscreen=True,
+                        key="timer",
+                    ),
+                ],
                 to="bgChildren",
             )
             await asyncio.sleep(1.0 / self.display_fps)
@@ -653,17 +633,33 @@ class TeleVuer:
                 to="bgChildren",
             )
 
+        if self._timer_start is None:
+            self._timer_start = time.perf_counter()
+
         while True:
+            elapsed = time.perf_counter() - self._timer_start
+            h = int(elapsed // 3600)
+            m = int((elapsed % 3600) // 60)
+            s = elapsed % 60
+            timer_str = f"{h:02d}:{m:02d}:{s:06.3f}"
+
             session.upsert(
-                WebRTCStereoVideoPlane(
-                    src=self.webrtc_url,
-                    iceServer=None,
-                    iceServers=[], 
-                    key="video-quad",
-                    aspect=self.aspect_ratio,
-                    height=3,
-                    layout="stereo-left-right"
-                ),
+                [
+                    WebRTCStereoVideoPlane(
+                        src=self.webrtc_url,
+                        iceServer=None,
+                        iceServers=[], 
+                        key="video-quad",
+                        aspect=self.aspect_ratio,
+                        height=3,
+                        layout="stereo-left-right"
+                    ),
+                    Html(
+                        f'<div style="color:#00ff00;font-family:monospace;font-size:48px;font-weight:bold;text-shadow:2px 2px 4px black;background:rgba(0,0,0,0.4);padding:6px 14px;border-radius:6px;">{timer_str}</div>',
+                        fullscreen=True,
+                        key="timer",
+                    ),
+                ],
                 to="bgChildren",
             )
             await asyncio.sleep(1.0 / self.display_fps)
@@ -690,16 +686,32 @@ class TeleVuer:
                 to="bgChildren",
             )
 
+        if self._timer_start is None:
+            self._timer_start = time.perf_counter()
+
         while True:
+            elapsed = time.perf_counter() - self._timer_start
+            h = int(elapsed // 3600)
+            m = int((elapsed % 3600) // 60)
+            s = elapsed % 60
+            timer_str = f"{h:02d}:{m:02d}:{s:06.3f}"
+
             session.upsert(
-                WebRTCVideoPlane(
-                    src=self.webrtc_url,
-                    iceServer=None,
-                    iceServers=[],
-                    key="video-quad",
-                    aspect=self.aspect_ratio,
-                    height=3,
-                ),
+                [
+                    WebRTCVideoPlane(
+                        src=self.webrtc_url,
+                        iceServer=None,
+                        iceServers=[],
+                        key="video-quad",
+                        aspect=self.aspect_ratio,
+                        height=3,
+                    ),
+                    Html(
+                        f'<div style="color:#00ff00;font-family:monospace;font-size:48px;font-weight:bold;text-shadow:2px 2px 4px black;background:rgba(0,0,0,0.4);padding:6px 14px;border-radius:6px;">{timer_str}</div>',
+                        fullscreen=True,
+                        key="timer",
+                    ),
+                ],
                 to="bgChildren",
             )
             await asyncio.sleep(1.0 / self.display_fps)

@@ -53,6 +53,8 @@ class H1ArmController(BaseArmController):
         self.last_published_q = np.zeros(14)
         self.head_target = np.zeros(2)
         self.last_published_head_q = np.zeros(2)
+        self.torso_target = np.zeros(2)   # [torso_lift, torso_pitch] (hw convention)
+        self.last_published_torso = np.zeros(2)
         self._ee_gripper_state = [0.0, 0.0]
 
         # ROS2
@@ -71,15 +73,6 @@ class H1ArmController(BaseArmController):
         self._gradual_start_time = None
         self._dq_limit_override = None
         self._speed_gradual_max = False
-
-        # 命令日志
-        self._command_log_file = None
-        self._log_path = Path(__file__).resolve().parents[3] / 'Log' / 'h1_arm_controller_cmd.log'
-        try:
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._command_log_file = self._log_path.open('a', encoding='utf-8')
-        except Exception:
-            pass
 
         # 线程
         logger.info("H1 ArmController: starting spin thread...")
@@ -147,6 +140,19 @@ class H1ArmController(BaseArmController):
                     self.head_smooth_alpha * new_target
                     + (1.0 - self.head_smooth_alpha) * self.head_target
                 )
+        self.publish_event.set()
+
+    def ctrl_torso(self, torso_q):
+        """控制躯干 [torso_lift, torso_pitch] (hw convention, 直接写入 LowCmd slot 0,1)。"""
+        with self.publish_lock:
+            t = np.asarray(torso_q, dtype=float).flatten()
+            if t.size >= 2:
+                # torso_lift: [0, 0.45] m,  torso_pitch: [0, 1.658] rad
+                self.torso_target[0] = float(np.clip(t[0], -0.01, 0.45))
+                self.torso_target[1] = float(np.clip(t[1], 0.0, 1.65806279))
+            elif t.size == 1:
+                # only pitch provided, keep lift unchanged
+                self.torso_target[1] = float(np.clip(t[0], 0.0, 1.65806279))
         self.publish_event.set()
 
     def set_ee_gripper(self, arm_idx, value):
@@ -295,8 +301,10 @@ class H1ArmController(BaseArmController):
                     q_tgt = self.q_target.copy()
                     tau_tgt = self.tauff_target.copy()
                     head_tgt = self.head_target.copy()
+                    torso_tgt = self.torso_target.copy()
                     cur_q = self.last_published_q.copy()
                     cur_head = self.last_published_head_q.copy()
+                    cur_torso = self.last_published_torso.copy()
 
                 # 臂部限速 + 坐标转换
                 q_clipped = self._clip_arm_q_target(q_tgt, cur_q, self.dq_limit)
@@ -329,6 +337,13 @@ class H1ArmController(BaseArmController):
                 for i, idx in enumerate(self.right_slots):
                     msg.motor_cmd[idx].q = float(q_hw[7 + i])
                     msg.motor_cmd[idx].tau = float(tau_hw[7 + i])
+
+                # 填充躯干 (slots 0, 1) — 直接写入 hw 值
+                torso_clipped = self._clip_torso_target(torso_tgt, cur_torso, 1.0)
+                with self.publish_lock:
+                    self.last_published_torso = torso_clipped.copy()
+                msg.motor_cmd[0].q = float(torso_clipped[0])  # TORSO_LIFT
+                msg.motor_cmd[1].q = float(torso_clipped[1])  # TORSO_PITCH
 
                 # 填充头部 (slots 2, 3)
                 if self.control_mode.solve_head:
@@ -383,6 +398,11 @@ class H1ArmController(BaseArmController):
         delta = target_q - current_q
         return current_q + np.clip(delta, -max_delta, max_delta)
 
+    def _clip_torso_target(self, target_q, current_q, velocity_limit):
+        max_delta = velocity_limit * self.dt
+        delta = target_q - current_q
+        return current_q + np.clip(delta, -max_delta, max_delta)
+
     # ══════════════════════════════════════════════════════════
     #  清理
     # ══════════════════════════════════════════════════════════
@@ -400,28 +420,21 @@ class H1ArmController(BaseArmController):
             if self.publish_thread.is_alive():
                 logger.warning("[stop] publish_thread did not exit within 3s")
 
+        # 先 shutdown rclpy，让 spin 线程从 rclpy.spin() 返回，再 join
+        if rclpy.ok():
+            logger.info("[stop] shutting down rclpy...")
+            rclpy.shutdown()
+
         # 等待 spin 线程退出
         if self.spin_thread is not None and self.spin_thread.is_alive():
             logger.info("[stop] waiting for spin_thread to join...")
             self.spin_thread.join(timeout=2.0)
 
-        # 销毁 ROS 节点并 shutdown
+        # 销毁 ROS 节点
         try:
-            if rclpy.ok():
-                logger.info("[stop] destroying ROS node and shutting down rclpy...")
-                self._ros_node.destroy_node()
-                rclpy.shutdown()
+            logger.info("[stop] destroying ROS node...")
+            self._ros_node.destroy_node()
         except Exception:
-            logger.exception("[stop] error during rclpy shutdown")
+            logger.exception("[stop] error during destroy_node")
 
-        # 关闭日志文件
-        self._close_log()
         logger.info("[stop] complete")
-
-    def _close_log(self):
-        try:
-            if self._command_log_file:
-                self._command_log_file.close()
-                self._command_log_file = None
-        except Exception:
-            pass

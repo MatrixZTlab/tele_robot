@@ -10,7 +10,7 @@ head_camera:
   - 640
   binocular: false
   fps: 30
-  video_id: 10
+  video_id: 2
   serial_number: CP2G853000D1
   physical_path: null
   enable_depth: true

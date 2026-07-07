@@ -56,7 +56,10 @@ class H1RobotConfig(RobotConfig):
             ],
             head_frame_name="Robot_Head_Tonod_Link",
             head_control_method="ik",
-            torso_joint_names=None,
+            torso_joint_names=[
+                "Robot_Body_Movement_Joint",
+                "Robot_Body_Rotation_Joint",
+            ],
             limit_mode="modified",
             cache_filename="topstar_h1_model_cache.pkl",
             arm_max_reach=0.69,

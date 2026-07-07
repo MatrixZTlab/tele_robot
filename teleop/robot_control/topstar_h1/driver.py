@@ -36,7 +36,7 @@ class H1RobotDriver(RobotDriver):
         logger.info(f"Building IK solver ({self.config.model_name})...")
         self.ik = H1ArmIK(
             self.config, self.control_mode,
-            visualization="ros2", verbose=self.verbose,
+            visualization="off", verbose=self.verbose,
         )
         logger.info(f"IK ready (control DOF={self.control_mode.ik_dof})")
 
