@@ -1,3 +1,6 @@
+import signal
+import socket
+import subprocess
 from vuer import Vuer
 from vuer.schemas import ImageBackground, Hands, MotionControllers, WebRTCVideoPlane, WebRTCStereoVideoPlane
 from multiprocessing import Value, Array, Process, shared_memory
@@ -8,6 +11,22 @@ import cv2
 import os
 from pathlib import Path
 from typing import Literal
+
+
+def _free_port(host: str, port: int) -> None:
+    """尝试释放端口：若有进程占用则杀死，TIME_WAIT 状态不阻塞启动。"""
+    try:
+        result = subprocess.run(
+            ['lsof', '-ti', f':{port}'], capture_output=True, text=True, timeout=3.0
+        )
+        if result.stdout.strip():
+            for pid in result.stdout.strip().split('\n'):
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except (OSError, ValueError):
+                    pass
+    except Exception:
+        pass
 
 
 class TeleVuer:
@@ -88,6 +107,9 @@ class TeleVuer:
                     cert_file = cert_file or str(current_module_dir / "cert.pem")
                     key_file = key_file or str(current_module_dir / "key.pem")
 
+        # 清理上次残留的 Vuer 进程（若有），TIME_WAIT 由 Vuer 内部 SO_REUSEADDR 处理
+        _free_port('0.0.0.0', 8012)
+
         self.vuer = Vuer(host='0.0.0.0', cert=cert_file, key=key_file, queries=dict(grid=False), queue_len=3)
         self.vuer.add_handler("CAMERA_MOVE")(self.on_cam_move)
         if self.use_hand_tracking:
@@ -104,7 +126,14 @@ class TeleVuer:
             if self.webrtc:
                 fn = self.main_image_binocular_webrtc if self.binocular else self.main_image_monocular_webrtc
             elif self.zmq:
-                self.img2display_shm = shared_memory.SharedMemory(create=True, size=np.prod(self.img_shape) * np.uint8().itemsize)
+                _shm_size = np.prod(self.img_shape) * np.uint8().itemsize
+                try:
+                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
+                except FileExistsError:
+                    # 上次异常退出残留，先清理再重建
+                    old = shared_memory.SharedMemory(name=None, create=False, size=_shm_size)
+                    old.unlink()
+                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
                 self.img2display = np.ndarray(self.img_shape, dtype=np.uint8, buffer=self.img2display_shm.buf)
                 self.latest_frame = None
                 self.new_frame_event = threading.Event()
@@ -118,7 +147,14 @@ class TeleVuer:
             if self.webrtc:
                 fn = self.main_image_binocular_webrtc_ego if self.binocular else self.main_image_monocular_webrtc_ego
             elif self.zmq:
-                self.img2display_shm = shared_memory.SharedMemory(create=True, size=np.prod(self.img_shape) * np.uint8().itemsize)
+                _shm_size = np.prod(self.img_shape) * np.uint8().itemsize
+                try:
+                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
+                except FileExistsError:
+                    # 上次异常退出残留，先清理再重建
+                    old = shared_memory.SharedMemory(name=None, create=False, size=_shm_size)
+                    old.unlink()
+                    self.img2display_shm = shared_memory.SharedMemory(create=True, size=_shm_size)
                 self.img2display = np.ndarray(self.img_shape, dtype=np.uint8, buffer=self.img2display_shm.buf)
                 self.latest_frame = None
                 self.new_frame_event = threading.Event()
@@ -206,8 +242,27 @@ class TeleVuer:
         self.new_frame_event.set()
 
     def close(self):
-        self.process.terminate()
-        self.process.join(timeout=0.5)
+        # 1. stop writer thread first
+        if hasattr(self, "stop_writer_event"):
+            self.stop_writer_event.set()
+        # 2. gracefully shut down Vuer subprocess (SIGINT -> KeyboardInterrupt in _vuer_run)
+        if hasattr(self, "process") and self.process.is_alive():
+            try:
+                self.process.send_signal(signal.SIGINT)  # 优雅退出，让 Vuer 清理 socket
+                self.process.join(timeout=3.0)
+            except Exception:
+                pass
+            if self.process.is_alive():
+                # 兜底：SIGKILL 强制终止
+                self.process.kill()
+                self.process.join(timeout=1.0)
+        # 3. clean up shared memory
+        if hasattr(self, "img2display_shm"):
+            try:
+                self.img2display_shm.close()
+                self.img2display_shm.unlink()
+            except Exception:
+                pass
         if self.display_mode in ("immersive", "ego") and not self.webrtc:
             self.stop_writer_event.set()
             self.new_frame_event.set()

@@ -420,18 +420,21 @@ class H1ArmController(BaseArmController):
             if self.publish_thread.is_alive():
                 logger.warning("[stop] publish_thread did not exit within 3s")
 
+        # 先 shutdown rclpy，让 spin 线程从 rclpy.spin() 返回，再 join
+        if rclpy.ok():
+            logger.info("[stop] shutting down rclpy...")
+            rclpy.shutdown()
+
         # 等待 spin 线程退出
         if self.spin_thread is not None and self.spin_thread.is_alive():
             logger.info("[stop] waiting for spin_thread to join...")
             self.spin_thread.join(timeout=2.0)
 
-        # 销毁 ROS 节点并 shutdown
+        # 销毁 ROS 节点
         try:
-            if rclpy.ok():
-                logger.info("[stop] destroying ROS node and shutting down rclpy...")
-                self._ros_node.destroy_node()
-                rclpy.shutdown()
+            logger.info("[stop] destroying ROS node...")
+            self._ros_node.destroy_node()
         except Exception:
-            logger.exception("[stop] error during rclpy shutdown")
+            logger.exception("[stop] error during destroy_node")
 
         logger.info("[stop] complete")

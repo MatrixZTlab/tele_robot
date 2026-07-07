@@ -1217,6 +1217,20 @@ if __name__ == '__main__':
                 rclpy.shutdown()
         except Exception:
             pass
+
+        # 4. stop Vuer subprocess + clean up shared memory
+        try:
+            if 'tv_wrapper' in locals() and hasattr(tv_wrapper, 'tvuer') and tv_wrapper.tvuer is not None:
+                tv_wrapper.tvuer.close()
+                logger_mp.info("Vuer subprocess terminated and shared memory cleaned.")
+        except Exception as e:
+            logger_mp.error(f"Failed to stop Vuer: {e}")
+
+        # 5. force exit if rclpy.shutdown() hangs (ROS 2 DDS known issue)
+        threading.Thread(
+            target=lambda: (time.sleep(5.0), os._exit(0)),
+            daemon=True,
+        ).start()
 '''
 conda deactivate
 source /opt/ros/humble/setup.sh
