@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TeleImager Three Cameras</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Arial, Helvetica, sans-serif;
+      background: #101214;
+      color: #f2f4f6;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #101214;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      height: 52px;
+      padding: 0 16px;
+      border-bottom: 1px solid #2b3036;
+      background: #171a1e;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 600;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #cbd1d8;
+    }
+
+    input {
+      width: 150px;
+      height: 30px;
+      padding: 4px 8px;
+      border: 1px solid #3a414a;
+      border-radius: 4px;
+      background: #0f1114;
+      color: #f2f4f6;
+      font: inherit;
+    }
+
+    button {
+      height: 30px;
+      padding: 0 12px;
+      border: 1px solid #48515b;
+      border-radius: 4px;
+      background: #242a31;
+      color: #f2f4f6;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #2d3540;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: calc((100vh - 52px) * 0.58) calc((100vh - 52px) * 0.42);
+      gap: 8px;
+      padding: 8px;
+      min-height: calc(100vh - 52px);
+    }
+
+    .camera {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid #2b3036;
+      border-radius: 6px;
+      background: #050607;
+    }
+
+    .camera:first-child {
+      grid-column: 1 / -1;
+    }
+
+    .label {
+      position: absolute;
+      z-index: 2;
+      left: 10px;
+      top: 10px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.68);
+      color: #ffffff;
+      font-size: 13px;
+      line-height: 1;
+      pointer-events: none;
+    }
+
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #050607;
+    }
+
+    @media (max-width: 760px) {
+      header {
+        height: auto;
+        min-height: 52px;
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 10px 12px;
+      }
+
+      .controls {
+        width: 100%;
+      }
+
+      input {
+        flex: 1;
+        min-width: 0;
+      }
+
+      main {
+        grid-template-columns: 1fr;
+        grid-template-rows: repeat(3, minmax(260px, 1fr));
+        min-height: calc(100vh - 94px);
+      }
+
+      .camera:first-child {
+        grid-column: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TeleImager Three Cameras</h1>
+    <div class="controls">
+      <label for="host">Host</label>
+      <input id="host" value="192.168.31.4">
+      <button id="reload" type="button">Reload</button>
+    </div>
+  </header>
+  <main>
+    <section class="camera">
+      <div class="label">head_camera : 60001</div>
+      <iframe id="head" title="head_camera" allow="autoplay; fullscreen; camera; microphone"></iframe>
+    </section>
+    <section class="camera">
+      <div class="label">left_wrist_camera : 60002</div>
+      <iframe id="left" title="left_wrist_camera" allow="autoplay; fullscreen; camera; microphone"></iframe>
+    </section>
+    <section class="camera">
+      <div class="label">right_wrist_camera : 60003</div>
+      <iframe id="right" title="right_wrist_camera" allow="autoplay; fullscreen; camera; microphone"></iframe>
+    </section>
+  </main>
+  <script>
+    const hostInput = document.getElementById("host");
+    const frames = [
+      ["head", 60001],
+      ["left", 60002],
+      ["right", 60003],
+    ];
+
+    function loadFrames() {
+      const host = hostInput.value.trim();
+      if (!host) return;
+      localStorage.setItem("teleimager-host", host);
+      for (const [id, port] of frames) {
+        document.getElementById(id).src = `https://${host}:${port}`;
+      }
+    }
+
+    const savedHost = localStorage.getItem("teleimager-host");
+    if (savedHost) hostInput.value = savedHost;
+    document.getElementById("reload").addEventListener("click", loadFrames);
+    hostInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadFrames();
+    });
+    loadFrames();
+  </script>
+</body>
+</html>

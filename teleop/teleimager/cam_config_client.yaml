@@ -13,7 +13,7 @@ head_camera:
   video_id: 2
   serial_number: CP2G853000D1
   physical_path: null
-  enable_depth: true
+  enable_depth: false
 left_wrist_camera:
   enable_zmq: true
   zmq_port: 55556

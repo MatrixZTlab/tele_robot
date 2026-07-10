@@ -7,7 +7,56 @@ from typing import Any
 
 import numpy as np
 
+import logging_mp
+
+logger_mp = logging_mp.getLogger(__name__)
+
 STATE_GROUPS = ("left_arm", "right_arm", "left_ee", "right_ee", "body")
+
+# Physical cameras in a fixed order. The dataset key for each stream is derived
+# from this order (see build_camera_key_plan), NOT from how many frames happen
+# to be present on a given control cycle — so a dropped frame can never renumber
+# another camera's stream.
+CAMERA_SOURCES = (
+    ("head_camera", "head"),
+    ("left_wrist_camera", "left_wrist"),
+    ("right_wrist_camera", "right_wrist"),
+)
+
+
+def build_camera_key_plan(camera_config: Any) -> list[dict[str, Any]]:
+    """Map each enabled physical camera to a FIXED dataset key.
+
+    Returns an ordered list of entries::
+
+        {"cam": "head_camera", "source": "head", "half": None | 0 | 1,
+         "color_key": "color_0", "depth_key": "depth_0" | None}
+
+    ``half`` handles a binocular head camera whose single frame is split into a
+    left/right pair. Keys are numbered by config order and stay stable for the
+    whole session, so a camera that misses a frame never shifts another
+    camera's ``color_N`` / ``depth_N`` index.
+    """
+    plan: list[dict[str, Any]] = []
+    idx = 0
+    for cam_name, source in CAMERA_SOURCES:
+        cam = (camera_config or {}).get(cam_name) or {}
+        if not cam.get("enable_zmq", False):
+            continue
+        enable_depth = bool(cam.get("enable_depth", False))
+        halves = (0, 1) if cam.get("binocular", False) else (None,)
+        for half in halves:
+            plan.append(
+                {
+                    "cam": cam_name,
+                    "source": source,
+                    "half": half,
+                    "color_key": f"color_{idx}",
+                    "depth_key": f"depth_{idx}" if enable_depth else None,
+                }
+            )
+            idx += 1
+    return plan
 
 
 def flatten_numeric_tree(tree: Any, prefix: str = "") -> tuple[list[float], list[str]]:
@@ -93,6 +142,11 @@ class LeRobotEpisodeWriter:
         tolerance_s: float = 1e-4,
         use_videos: bool = True,
         dataset_cls: Any | None = None,
+        expected_color_keys: Any | None = None,
+        expected_depth_keys: Any | None = None,
+        schema_warmup_frames: int = 90,
+        color_input_bgr: bool = True,
+        vcodec: str = "h264",
     ):
         self.root = Path(root)
         self.repo_id = repo_id or default_repo_id(self.root.name)
@@ -102,13 +156,34 @@ class LeRobotEpisodeWriter:
         self.tolerance_s = float(tolerance_s)
         self.use_videos = use_videos
         self.dataset_cls = dataset_cls
+        # Camera frames arrive from OpenCV as BGR; LeRobot expects RGB, so
+        # flip channels on write unless the caller already provides RGB.
+        self.color_input_bgr = bool(color_input_bgr)
+        # Video codec for LeRobot's encoder. LeRobot 0.4.x defaults to
+        # 'libsvtav1' (AV1), which many players/browsers can't decode. 'h264'
+        # is broadly playable and lossy-equivalent for training.
+        self.vcodec = vcodec
+        # Full set of camera stream keys that SHOULD appear once every enabled
+        # camera has produced a frame. The dataset schema is not committed until
+        # all of these are seen (or the warmup budget is exhausted), so a camera
+        # that is slow to start never gets dropped from the schema.
+        self.expected_color_keys = list(expected_color_keys or [])
+        self.expected_depth_keys = list(expected_depth_keys or [])
+        self.schema_warmup_frames = int(schema_warmup_frames)
 
         self.dataset = None
         self.episode_active = False
         self.item_id = -1
         self.current_episode_index = 0
         self.pending_alignment: list[dict[str, Any]] = []
+        self.feature_specs: dict[str, Any] = {}
+        self.last_feature_values: dict[str, np.ndarray] = {}
         self.closed = False
+        # Frames buffered before the schema is committed, plus the merged view
+        # of every camera stream seen so far, used to build a complete schema.
+        self._warmup_samples: list[dict[str, Any]] = []
+        self._seen_colors: dict[str, Any] = {}
+        self._seen_depths: dict[str, Any] = {}
 
     def is_ready(self):
         return not self.episode_active
@@ -138,25 +213,105 @@ class LeRobotEpisodeWriter:
                 raise RuntimeError("Could not create a new LeRobot episode")
 
         self.item_id += 1
-        if self.dataset is None:
+        colors = colors or {}
+        depths = depths or {}
+
+        # Resuming an existing dataset: the schema is already fixed on disk, so
+        # there is nothing to warm up — emit straight away.
+        if self.dataset is None and self._has_lerobot_metadata():
             self.dataset = self._create_or_resume_dataset(colors, depths, states, actions)
             self.current_episode_index = self._next_episode_index()
+            self._capture_dataset_features()
 
-        frame = self._build_lerobot_frame(colors, depths or {}, states, actions)
+        sample = {
+            "colors": colors,
+            "depths": depths,
+            "states": states,
+            "actions": actions,
+            "frame_index": self.item_id,
+            "alignment": alignment or {},
+        }
+
+        if self.dataset is None:
+            # Schema not committed yet: remember every camera stream we have seen
+            # and buffer the frame. Once all enabled cameras have produced at
+            # least one frame (or the warmup budget runs out) we build a schema
+            # that covers all of them, then flush the buffer.
+            for key, image in colors.items():
+                self._seen_colors.setdefault(key, image)
+            for key, depth in depths.items():
+                self._seen_depths.setdefault(key, depth)
+            self._warmup_samples.append(sample)
+            if self._schema_ready():
+                self._commit_schema_and_flush(states, actions)
+            return
+
+        self._emit_frame(sample)
+
+    def _schema_ready(self) -> bool:
+        """True once we have seen every expected camera stream, or the warmup
+        budget is exhausted (so a camera that never starts can't stall forever)."""
+        expected_colors = set(self.expected_color_keys)
+        expected_depths = set(self.expected_depth_keys)
+        have_all = expected_colors.issubset(self._seen_colors) and expected_depths.issubset(
+            self._seen_depths
+        )
+        if have_all:
+            return True
+        if len(self._warmup_samples) >= self.schema_warmup_frames:
+            missing_c = sorted(expected_colors - set(self._seen_colors))
+            missing_d = sorted(expected_depths - set(self._seen_depths))
+            if missing_c or missing_d:
+                logger_mp.warning(
+                    "[LeRobotEpisodeWriter] Committing schema after %d warmup frames; "
+                    "cameras color=%s depth=%s never produced a frame and are "
+                    "EXCLUDED from the dataset. Check that these cameras are "
+                    "connected and streaming before recording.",
+                    len(self._warmup_samples),
+                    missing_c,
+                    missing_d,
+                )
+            return True
+        return False
+
+    def _commit_schema_and_flush(self, states, actions):
+        # Build the schema from the union of every camera seen during warmup so
+        # no enabled stream is missing, then replay the buffered frames.
+        self.dataset = self._create_or_resume_dataset(
+            self._seen_colors, self._seen_depths, states, actions
+        )
+        self.current_episode_index = self._next_episode_index()
+        self._capture_dataset_features()
+        buffered = self._warmup_samples
+        self._warmup_samples = []
+        for sample in buffered:
+            self._emit_frame(sample)
+
+    def _emit_frame(self, sample):
+        frame = self._build_lerobot_frame(
+            sample["colors"], sample["depths"], sample["states"], sample["actions"]
+        )
+        frame = self._complete_frame(frame)
         self.dataset.add_frame(frame)
+        self._remember_frame_values(frame)
         self.pending_alignment.append(
             {
                 "episode_index": self.current_episode_index,
-                "frame_index": self.item_id,
-                "timestamp": self.item_id / self.fps if self.fps > 0 else 0.0,
-                "source_idx": self.item_id,
-                "alignment": alignment or {},
+                "frame_index": sample["frame_index"],
+                "timestamp": sample["frame_index"] / self.fps if self.fps > 0 else 0.0,
+                "source_idx": sample["frame_index"],
+                "alignment": sample["alignment"],
             }
         )
 
     def save_episode(self):
         if not self.episode_active:
             return
+        # A very short episode may end before every camera showed up. Commit the
+        # schema from whatever we have and flush the buffer so no frames are lost.
+        if self.dataset is None and self._warmup_samples:
+            last = self._warmup_samples[-1]
+            self._commit_schema_and_flush(last["states"], last["actions"])
         if self.dataset is not None and self.item_id >= 0:
             self.dataset.save_episode()
             self._write_alignment_records(self.pending_alignment)
@@ -175,11 +330,13 @@ class LeRobotEpisodeWriter:
     def _create_or_resume_dataset(self, colors, depths, states, actions):
         dataset_cls = self.dataset_cls or load_lerobot_dataset_cls()
         if self._has_lerobot_metadata():
-            return dataset_cls.resume(
+            dataset = dataset_cls.resume(
                 repo_id=self.repo_id,
                 root=self.root,
                 tolerance_s=self.tolerance_s,
             )
+            self.feature_specs = dict(getattr(dataset, "features", {}) or {})
+            return dataset
 
         if self.root.exists():
             if any(self.root.iterdir()):
@@ -190,7 +347,8 @@ class LeRobotEpisodeWriter:
             self.root.rmdir()
 
         features = self._build_features(colors, depths or {}, states, actions)
-        return dataset_cls.create(
+        self.feature_specs = features
+        create_kwargs = dict(
             repo_id=self.repo_id,
             fps=self.fps,
             features=features,
@@ -199,6 +357,17 @@ class LeRobotEpisodeWriter:
             use_videos=self.use_videos,
             tolerance_s=self.tolerance_s,
         )
+        # Only request a specific codec when actually encoding videos.
+        if self.use_videos and self.vcodec:
+            create_kwargs["vcodec"] = self.vcodec
+        return dataset_cls.create(**create_kwargs)
+
+    def _capture_dataset_features(self):
+        if self.dataset is None:
+            return
+        dataset_features = getattr(self.dataset, "features", None)
+        if dataset_features:
+            self.feature_specs = dict(dataset_features)
 
     def _has_lerobot_metadata(self):
         return (self.root / "meta" / "info.json").exists()
@@ -251,11 +420,55 @@ class LeRobotEpisodeWriter:
             "observation.state": np.asarray(state_values, dtype=np.float32),
             "action": np.asarray(action_values, dtype=np.float32),
         }
+        # Only emit camera streams that are part of the committed schema. A
+        # camera whose first frame arrived AFTER the schema was committed (its
+        # shape was never known at build time) is dropped rather than passed to
+        # add_frame, which would reject the unknown key and crash recording.
         for key, image in sorted((colors or {}).items()):
-            frame[f"observation.images.{key}"] = np.asarray(image)
+            spec_key = f"observation.images.{key}"
+            if self._key_in_schema(spec_key):
+                arr = np.asarray(image)
+                # LeRobot stores images as RGB. Camera frames come from OpenCV
+                # as BGR, so flip the channel order (matches the offline
+                # export_lerobot_dataset.py read_rgb path). Without this the
+                # recorded videos have red/blue channels swapped.
+                if self.color_input_bgr and arr.ndim == 3 and arr.shape[-1] == 3:
+                    arr = arr[..., ::-1]
+                frame[spec_key] = np.ascontiguousarray(arr)
         for key, depth in sorted((depths or {}).items()):
-            frame[f"observation.depths.{key}"] = depth_as_rgb(depth)
+            spec_key = f"observation.depths.{key}"
+            if self._key_in_schema(spec_key):
+                frame[spec_key] = depth_as_rgb(depth)
         return frame
+
+    def _key_in_schema(self, spec_key: str) -> bool:
+        # Before the schema is committed feature_specs is empty; accept everything
+        # so warmup can collect shapes. After commit, restrict to known keys.
+        if not self.feature_specs:
+            return True
+        return spec_key in self.feature_specs
+
+    def _complete_frame(self, frame):
+        for key, spec in (self.feature_specs or {}).items():
+            if key in frame:
+                continue
+            if key in self.last_feature_values:
+                frame[key] = self.last_feature_values[key].copy()
+                continue
+            if key.startswith(("observation.images.", "observation.depths.")):
+                shape = tuple(spec.get("shape", ())) if isinstance(spec, dict) else ()
+                if len(shape) == 3:
+                    frame[key] = np.zeros(shape, dtype=np.uint8)
+                    continue
+            if key in ("observation.state", "action"):
+                shape = tuple(spec.get("shape", ())) if isinstance(spec, dict) else ()
+                frame[key] = np.zeros(shape, dtype=np.float32)
+        return frame
+
+    def _remember_frame_values(self, frame):
+        for key, value in frame.items():
+            if key.startswith(("observation.images.", "observation.depths.")):
+                self.last_feature_values[key] = np.asarray(value).copy()
 
     def _write_alignment_records(self, records):
         if not records:

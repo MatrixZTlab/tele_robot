@@ -22,7 +22,11 @@ from teleop.robot_control._base.control_mode import ControlMode
 from teleimager.image_client import ImageClient
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.record import Recorder, RecorderManager
-from teleop.utils.lerobot_episode_writer import LeRobotEpisodeWriter, default_repo_id
+from teleop.utils.lerobot_episode_writer import (
+    LeRobotEpisodeWriter,
+    build_camera_key_plan,
+    default_repo_id,
+)
 import queue as _queue
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -561,7 +565,15 @@ if __name__ == '__main__':
             # directly into a LeRobotDataset. Alignment timing details are stored
             # as a sidecar under meta/tele_robot_alignment.jsonl.
             try:
-                lerobot_root = os.path.join(args.task_dir, args.task_name)
+                lerobot_root = os.path.join(args.task_dir, args.task_name, "lerobot")
+                # Fixed camera->key plan: each enabled camera keeps the same
+                # color_N/depth_N key for the whole session so a dropped frame
+                # never renumbers another camera's stream.
+                camera_key_plan = build_camera_key_plan(camera_config)
+                expected_color_keys = [entry["color_key"] for entry in camera_key_plan]
+                expected_depth_keys = [
+                    entry["depth_key"] for entry in camera_key_plan if entry["depth_key"]
+                ]
                 episode_writer = LeRobotEpisodeWriter(
                     root=lerobot_root,
                     repo_id=args.lerobot_repo_id or default_repo_id(args.task_name),
@@ -570,6 +582,8 @@ if __name__ == '__main__':
                     robot_type=robot.config.model_name,
                     tolerance_s=args.sync_tolerance_s,
                     use_videos=True,
+                    expected_color_keys=expected_color_keys,
+                    expected_depth_keys=expected_depth_keys,
                 )
             except Exception:
                 logger_mp.exception('Failed to initialize LeRobot dataset writer')
@@ -1157,38 +1171,36 @@ if __name__ == '__main__':
                         colors = {}
                         depths = {}
                         camera_timestamps_ns = {}
-                        if camera_config['head_camera']['binocular']:
-                            if head_img is not None:
-                                colors[f"color_{0}"] = head_img.bgr[:, :camera_config['head_camera']['image_shape'][1]//2]
-                                colors[f"color_{1}"] = head_img.bgr[:, camera_config['head_camera']['image_shape'][1]//2:]
-                                if getattr(head_img, 'timestamp_ns', None) is not None:
-                                    camera_timestamps_ns["color_0"] = head_img.timestamp_ns
-                                    camera_timestamps_ns["color_1"] = head_img.timestamp_ns
-                                if getattr(head_img, 'depth', None) is not None:
-                                    _head_depth = head_img.depth
-                                    depths[f"depth_{0}"] = _head_depth[:, :camera_config['head_camera']['image_shape'][1]//2]
-                                    depths[f"depth_{1}"] = _head_depth[:, camera_config['head_camera']['image_shape'][1]//2:]
-                        else:
-                            if head_img is not None:
-                                colors[f"color_{0}"] = head_img.bgr
-                                if getattr(head_img, 'timestamp_ns', None) is not None:
-                                    camera_timestamps_ns["color_0"] = head_img.timestamp_ns
-                                if getattr(head_img, 'depth', None) is not None:
-                                    depths[f"depth_{0}"] = head_img.depth
-                        next_color_idx = len(colors)
-                        if left_wrist_img is not None and getattr(left_wrist_img, 'bgr', None) is not None:
-                            colors[f"color_{next_color_idx}"] = left_wrist_img.bgr
-                            if getattr(left_wrist_img, 'timestamp_ns', None) is not None:
-                                camera_timestamps_ns[f"color_{next_color_idx}"] = left_wrist_img.timestamp_ns
-                            if getattr(left_wrist_img, 'depth', None) is not None:
-                                depths[f"depth_{next_color_idx}"] = left_wrist_img.depth
-                            next_color_idx += 1
-                        if right_wrist_img is not None and getattr(right_wrist_img, 'bgr', None) is not None:
-                            colors[f"color_{next_color_idx}"] = right_wrist_img.bgr
-                            if getattr(right_wrist_img, 'timestamp_ns', None) is not None:
-                                camera_timestamps_ns[f"color_{next_color_idx}"] = right_wrist_img.timestamp_ns
-                            if getattr(right_wrist_img, 'depth', None) is not None:
-                                depths[f"depth_{next_color_idx}"] = right_wrist_img.depth
+                        # Each physical camera writes to its FIXED key from the
+                        # plan (built once from camera_config). A camera that
+                        # missed this frame simply leaves its key absent — it can
+                        # never take over another camera's color_N/depth_N index.
+                        camera_images = {
+                            "head": head_img,
+                            "left_wrist": left_wrist_img,
+                            "right_wrist": right_wrist_img,
+                        }
+                        for entry in camera_key_plan:
+                            img = camera_images.get(entry["source"])
+                            if img is None or getattr(img, 'bgr', None) is None:
+                                continue
+                            bgr = img.bgr
+                            depth = getattr(img, 'depth', None)
+                            half = entry["half"]
+                            if half is not None:
+                                # Binocular frame: split into left/right halves.
+                                w = camera_config[entry["cam"]]['image_shape'][1]
+                                half_w = w // 2
+                                col_slice = slice(None, half_w) if half == 0 else slice(half_w, None)
+                                colors[entry["color_key"]] = bgr[:, col_slice]
+                                if entry["depth_key"] and depth is not None:
+                                    depths[entry["depth_key"]] = depth[:, col_slice]
+                            else:
+                                colors[entry["color_key"]] = bgr
+                                if entry["depth_key"] and depth is not None:
+                                    depths[entry["depth_key"]] = depth
+                            if getattr(img, 'timestamp_ns', None) is not None:
+                                camera_timestamps_ns[entry["color_key"]] = img.timestamp_ns
 
                         # 构建 states/actions（与 RobotDriver._collect_recording_state 对齐）
                         left_arm_state = recording_snapshot.get("left_arm_state", [])

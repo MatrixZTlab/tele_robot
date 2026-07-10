@@ -1,5 +1,10 @@
 """TOPSTAR_H1 机器人配置。"""
+from pathlib import Path
+
 from teleop.robot_control._base.robot_config import RobotConfig
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_MODEL_DIR = _REPO_ROOT / "assets" / "topstar_h1"
 
 
 class H1RobotConfig(RobotConfig):
@@ -8,16 +13,8 @@ class H1RobotConfig(RobotConfig):
     def __init__(self, **overrides):
         defaults = dict(
             model_name="TOPSTAR_H1",
-            urdf_path=(
-                "/media/ai/d9787eb9-5947-4134-be08-d9b5ed71bdde"
-                "/tele_robot/tele_robot_sdk/tele_robot/"
-                "assets/topstar_h1/_tmp_h1_mujoco.urdf"
-            ),
-            model_dir=(
-                "/media/ai/d9787eb9-5947-4134-be08-d9b5ed71bdde"
-                "/tele_robot/tele_robot_sdk/tele_robot/"
-                "assets/topstar_h1"
-            ),
+            urdf_path=str(_MODEL_DIR / "_tmp_h1_mujoco.urdf"),
+            model_dir=str(_MODEL_DIR),
             locked_joint_names=[
                 "Robot_Body_Movement_Joint",
                 "Robot_Body_Rotation_Joint",

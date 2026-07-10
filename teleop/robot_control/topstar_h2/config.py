@@ -1,7 +1,10 @@
 """TOPSTAR_H2 机器人配置。"""
+from pathlib import Path
+
 from teleop.robot_control._base.robot_config import RobotConfig
 
-_BASE = "/media/ai/d9787eb9-5947-4134-be08-d9b5ed71bdde/tele_robot/tele_robot_sdk/tele_robot"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_MODEL_DIR = _REPO_ROOT / "assets" / "TH010_URDF_V2.1" / "urdf"
 
 
 class H2RobotConfig(RobotConfig):
@@ -10,8 +13,8 @@ class H2RobotConfig(RobotConfig):
     def __init__(self, **overrides):
         defaults = dict(
             model_name="TOPSTAR_H2",
-            urdf_path=f"{_BASE}/assets/TH010_URDF_V2.1/urdf/TH010_URDF_V2.0.urdf",
-            model_dir=f"{_BASE}/assets/TH010_URDF_V2.1/urdf",
+            urdf_path=str(_MODEL_DIR / "TH010_URDF_V2.0.urdf"),
+            model_dir=str(_MODEL_DIR),
             locked_joint_names=[
                 # 双腿 12 关节 + 腰部 1 关节
                 "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
