@@ -10,7 +10,7 @@ Pinocchio/CasADi IK solver, and command path remain unchanged.
 ## Scope
 
 Production code is added only in
-`teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py`. Unit tests live
+`teleop/robot_control/vr_mujoco_relative_teleop.py`. Unit tests live
 in `tests/test_vr_mujoco_relative_teleop.py`.
 
 The module consumes:

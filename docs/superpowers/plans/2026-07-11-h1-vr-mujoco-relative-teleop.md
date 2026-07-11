@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Create only one production file: `teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py`.
+- Create only one production file: `teleop/robot_control/vr_mujoco_relative_teleop.py`.
 - Do not modify `teleop_hand_and_arm.py`, existing robot drivers, `XRTransformer`, or Pinocchio/CasADi IK.
 - Preserve H1 arm order: seven left joints followed by seven right joints.
 - Import MuJoCo lazily so importing the new module does not require MuJoCo.
@@ -21,7 +21,7 @@
 ### Task 1: Fixed-reference VR pose tracker
 
 **Files:**
-- Create: `teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py`
+- Create: `teleop/robot_control/vr_mujoco_relative_teleop.py`
 - Create: `tests/test_vr_mujoco_relative_teleop.py`
 
 **Interfaces:**
@@ -151,14 +151,14 @@ Run the Task 1 test command. Expected: all tracker tests pass.
 - [ ] **Step 5: Commit Task 1**
 
 ```bash
-git add teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
+git add teleop/robot_control/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
 git commit -m "feat: add H1 VR relative pose tracker"
 ```
 
 ### Task 2: Pure NumPy damped LM math
 
 **Files:**
-- Modify: `teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py`
+- Modify: `teleop/robot_control/vr_mujoco_relative_teleop.py`
 - Modify: `tests/test_vr_mujoco_relative_teleop.py`
 
 **Interfaces:**
@@ -239,14 +239,14 @@ Expected: tracker and LM math tests pass.
 - [ ] **Step 5: Commit Task 2**
 
 ```bash
-git add teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
+git add teleop/robot_control/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
 git commit -m "feat: add dual-arm damped LM math"
 ```
 
 ### Task 3: Optional MuJoCo-backed H1 dual-arm solver
 
 **Files:**
-- Modify: `teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py`
+- Modify: `teleop/robot_control/vr_mujoco_relative_teleop.py`
 - Modify: `tests/test_vr_mujoco_relative_teleop.py`
 
 **Interfaces:**
@@ -318,7 +318,7 @@ is explicitly skipped only because MuJoCo is not installed.
 - [ ] **Step 5: Run static checks**
 
 ```bash
-python -m compileall teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
+python -m compileall teleop/robot_control/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
 git diff --check
 ```
 
@@ -327,14 +327,14 @@ Expected: both commands exit zero.
 - [ ] **Step 6: Commit Task 3**
 
 ```bash
-git add teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
+git add teleop/robot_control/vr_mujoco_relative_teleop.py tests/test_vr_mujoco_relative_teleop.py
 git commit -m "feat: add optional H1 MuJoCo LM IK"
 ```
 
 ### Task 4: Final review and handoff
 
 **Files:**
-- Review: `teleop/robot_control/topstar_h1/vr_mujoco_relative_teleop.py`
+- Review: `teleop/robot_control/vr_mujoco_relative_teleop.py`
 - Review: `tests/test_vr_mujoco_relative_teleop.py`
 - Review: `docs/superpowers/specs/2026-07-11-vr-relative-pose-tracker-design.md`
 
