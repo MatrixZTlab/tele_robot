@@ -98,7 +98,8 @@ Translation follows the `vr_teleop` residual tracker:
 ```text
 delta_p_xr = p_w - p_w0
 delta_p_robot = B * delta_p_xr
-smoothed_t = alpha * delta_p_robot + (1 - alpha) * previous_smoothed_t
+smoothed_t = delta_p_robot                              # first residual
+smoothed_t = alpha * delta_p_robot + (1-alpha) * old   # later residuals
 p_target = p_e0 + position_scale * smoothed_t
 ```
 
