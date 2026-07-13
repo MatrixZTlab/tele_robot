@@ -12,6 +12,7 @@ from teleop.robot_control.vr_mujoco_relative_teleop import (
     H1MuJoCoLMIK,
     LMIKResult,
     VRRelativePoseTracker,
+    _augment_regularization,
     _damped_least_squares_step,
     _load_mujoco,
     _rotation_error,
@@ -155,6 +156,83 @@ class VRRelativePoseTrackerTest(unittest.TestCase):
         invalid[0, 0] = np.nan
         with self.assertRaises(ValueError):
             tracker.update(invalid)
+        invalid_last_row = np.eye(4)
+        invalid_last_row[3, 0] = 1.0
+        with self.assertRaises(ValueError):
+            tracker.update(invalid_last_row)
+
+    def test_negate_rot_xy_flips_x_and_y_rotation_components(self):
+        # vr_teleop WristTracker's negate_rot_xy negates (qx, qy) of the
+        # relative rotation, i.e. R -> diag(-1,-1,1) @ R @ diag(-1,-1,1).
+        # A rotation about X should have its sense flipped; a rotation about Z
+        # should be unchanged.
+        neg = np.diag([-1.0, -1.0, 1.0])
+
+        def rotx(angle):
+            c, s = np.cos(angle), np.sin(angle)
+            return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+        plain = VRRelativePoseTracker(self.ee0, np.eye(3))
+        flipped = VRRelativePoseTracker(self.ee0, np.eye(3), negate_rot_xy=True)
+        plain.update(np.eye(4))
+        flipped.update(np.eye(4))
+        wrist = np.eye(4)
+        wrist[:3, :3] = rotx(np.pi / 5)
+
+        plain.update(wrist)
+        flipped.update(wrist)
+
+        np.testing.assert_allclose(
+            flipped.rotation_residual,
+            neg @ plain.rotation_residual @ neg,
+            atol=1e-12,
+        )
+        # X-axis rotation sense is flipped by the negation.
+        np.testing.assert_allclose(
+            flipped.rotation_residual, rotx(-np.pi / 5), atol=1e-7
+        )
+
+    def test_negate_rot_xy_defaults_to_false(self):
+        # Default must match vr_teleop's negate_rot_xy=False: no sign flip.
+        plain = VRRelativePoseTracker(self.ee0, np.eye(3), negate_rot_xy=False)
+        default = VRRelativePoseTracker(self.ee0, np.eye(3))
+        for tracker in (plain, default):
+            tracker.update(np.eye(4))
+        wrist = np.eye(4)
+        wrist[:3, :3] = _rotz(np.pi / 3)
+        np.testing.assert_allclose(
+            plain.update(wrist), default.update(wrist), atol=1e-12
+        )
+
+    def test_non_orthonormal_wrist_is_normalized_to_valid_target_rotation(self):
+        # The public interface accepts small XR matrix drift, but the internal
+        # quaternion path must normalize it before returning a 4x4 IK target.
+        tracker = VRRelativePoseTracker(self.ee0, np.eye(3))
+        tracker.update(np.eye(4))
+        drifted = np.eye(4)
+        drifted[:3, :3] = _rotz(0.2)
+        drifted[0, 0] += 1e-3
+
+        target = tracker.update(drifted)
+
+        rotation = target[:3, :3]
+        np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-10)
+        self.assertAlmostEqual(np.linalg.det(rotation), 1.0, places=10)
+
+    def test_quaternion_internal_path_preserves_known_relative_rotation(self):
+        tracker = VRRelativePoseTracker(self.ee0, self.basis)
+        reference = np.eye(4)
+        reference[:3, :3] = _rotz(-0.3)
+        tracker.update(reference)
+        current = reference.copy()
+        current[:3, :3] = _rotz(0.4) @ reference[:3, :3]
+
+        target = tracker.update(current)
+
+        expected_delta = self.basis @ _rotz(0.4) @ self.basis.T
+        np.testing.assert_allclose(
+            target[:3, :3], expected_delta @ self.ee0[:3, :3], atol=1e-10
+        )
 
 
 class LMMathTest(unittest.TestCase):
@@ -179,6 +257,25 @@ class LMMathTest(unittest.TestCase):
         error = _rotation_error(_rotz(np.pi), np.eye(3))
         self.assertTrue(np.all(np.isfinite(error)))
         self.assertAlmostEqual(np.linalg.norm(error), np.pi, places=6)
+
+    def test_rotation_error_near_pi_has_correct_axis_direction(self):
+        # Near-pi branch: the recovered axis must point the physically correct
+        # way (disambiguated by the antisymmetric part), not an arbitrary
+        # eigenvector sign. A +Z rotation just under pi must yield a +Z axis.
+        angle = np.pi - 5e-7
+        error = _rotation_error(_rotz(angle), np.eye(3))
+        np.testing.assert_allclose(error, [0.0, 0.0, angle], atol=1e-6)
+        # And a -Z rotation just under pi must yield a -Z axis.
+        error_neg = _rotation_error(_rotz(-angle), np.eye(3))
+        np.testing.assert_allclose(error_neg, [0.0, 0.0, -angle], atol=1e-6)
+
+    def test_rotation_error_accepts_slightly_non_orthonormal_input(self):
+        # Inner-loop _rotation_error no longer re-validates orthonormality;
+        # MuJoCo FK output with tiny numerical drift must not raise.
+        drifted = _rotz(0.3)
+        drifted[0, 0] += 1e-6
+        error = _rotation_error(drifted, np.eye(3))
+        self.assertTrue(np.all(np.isfinite(error)))
 
     def test_stacked_system_orders_left_then_right(self):
         left_error = np.arange(6.0)
@@ -216,6 +313,65 @@ class LMMathTest(unittest.TestCase):
         self.assertTrue(result.converged)
         self.assertEqual(result.iterations, 3)
 
+    def test_regularization_is_noop_with_original_defaults(self):
+        # vr_teleop defaults: home_qpos=None, current_q_weight=0.0 -> unchanged.
+        task_error = np.arange(12.0)
+        task_jac = np.ones((12, 14))
+        error, jacobian = _augment_regularization(
+            task_error,
+            task_jac,
+            current_q=np.zeros(14),
+            initial_q=np.zeros(14),
+            home_qpos=None,
+            home_weight=0.01,
+            current_q_weight=0.0,
+        )
+        np.testing.assert_array_equal(error, task_error)
+        np.testing.assert_array_equal(jacobian, task_jac)
+
+    def test_home_regularization_appends_scaled_pullback_rows(self):
+        # Matches solve_pose_ik: appends sqrt(home_weight)*(home - q) residual
+        # rows with an identity Jacobian block against the 14 arm DOFs.
+        task_error = np.zeros(12)
+        task_jac = np.zeros((12, 14))
+        current_q = np.full(14, 0.5)
+        home_qpos = np.zeros(14)
+        error, jacobian = _augment_regularization(
+            task_error,
+            task_jac,
+            current_q=current_q,
+            initial_q=current_q,
+            home_qpos=home_qpos,
+            home_weight=0.04,
+            current_q_weight=0.0,
+        )
+        scale = np.sqrt(0.04)
+        self.assertEqual(error.shape, (26,))
+        self.assertEqual(jacobian.shape, (26, 14))
+        np.testing.assert_allclose(error[12:], scale * (home_qpos - current_q))
+        np.testing.assert_allclose(jacobian[12:], scale * np.eye(14))
+
+    def test_current_q_regularization_penalizes_deviation_from_initial(self):
+        # current term penalizes deviation from the solve's INITIAL arm state,
+        # not the per-iteration q, matching solve_pose_ik's q_init usage.
+        task_error = np.zeros(12)
+        task_jac = np.zeros((12, 14))
+        current_q = np.full(14, 0.3)
+        initial_q = np.zeros(14)
+        error, jacobian = _augment_regularization(
+            task_error,
+            task_jac,
+            current_q=current_q,
+            initial_q=initial_q,
+            home_qpos=None,
+            home_weight=0.01,
+            current_q_weight=0.09,
+        )
+        scale = np.sqrt(0.09)
+        self.assertEqual(error.shape, (26,))
+        np.testing.assert_allclose(error[12:], scale * (initial_q - current_q))
+        np.testing.assert_allclose(jacobian[12:], scale * np.eye(14))
+
 
 class H1MuJoCoLMIKTest(unittest.TestCase):
     def test_missing_mujoco_has_actionable_error(self):
@@ -237,6 +393,9 @@ class H1MuJoCoLMIKTest(unittest.TestCase):
             {"tolerance": 0.0},
             {"rotation_weight": -1.0},
             {"damping": 0.0},
+            {"home_weight": -1.0},
+            {"current_q_weight": -1.0},
+            {"home_qpos": np.zeros(13)},
         )
         for options in invalid_options:
             with self.subTest(options=options), self.assertRaises(ValueError):

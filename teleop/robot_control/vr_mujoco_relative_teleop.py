@@ -64,10 +64,111 @@ def _validate_pose(pose: np.ndarray, name: str) -> np.ndarray:
     return value.copy()
 
 
-def _rotation_angle(rotation: np.ndarray) -> float:
-    value = _validate_rotation(rotation, "rotation")
-    cosine = np.clip((np.trace(value) - 1.0) * 0.5, -1.0, 1.0)
-    return float(np.arccos(cosine))
+def _project_to_so3(rotation: np.ndarray) -> np.ndarray:
+    """Return the nearest proper rotation matrix in Frobenius norm."""
+    value = np.asarray(rotation, dtype=np.float64)
+    if value.shape != _ROTATION_SHAPE or not np.all(np.isfinite(value)):
+        raise ValueError("rotation must have shape (3, 3) and be finite")
+    u, _, vt = np.linalg.svd(value)
+    projected = u @ vt
+    if np.linalg.det(projected) < 0.0:
+        u[:, -1] *= -1.0
+        projected = u @ vt
+    return projected
+
+
+def _normalize_quaternion(quaternion: np.ndarray, name: str) -> np.ndarray:
+    value = np.asarray(quaternion, dtype=np.float64)
+    if value.shape != (4,) or not np.all(np.isfinite(value)):
+        raise ValueError(f"{name} must contain four finite values")
+    norm = np.linalg.norm(value)
+    if norm < 1e-12:
+        raise ValueError(f"{name} must have non-zero norm")
+    return value / norm
+
+
+def _quaternion_multiply(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Hamilton product for quaternions stored as ``(x, y, z, w)``."""
+    lx, ly, lz, lw = _normalize_quaternion(left, "left quaternion")
+    rx, ry, rz, rw = _normalize_quaternion(right, "right quaternion")
+    return _normalize_quaternion(
+        np.array(
+            [
+                lw * rx + lx * rw + ly * rz - lz * ry,
+                lw * ry - lx * rz + ly * rw + lz * rx,
+                lw * rz + lx * ry - ly * rx + lz * rw,
+                lw * rw - lx * rx - ly * ry - lz * rz,
+            ],
+            dtype=np.float64,
+        ),
+        "quaternion product",
+    )
+
+
+def _quaternion_inverse(quaternion: np.ndarray) -> np.ndarray:
+    x, y, z, w = _normalize_quaternion(quaternion, "quaternion")
+    return np.array([-x, -y, -z, w], dtype=np.float64)
+
+
+def _quaternion_to_matrix(quaternion: np.ndarray) -> np.ndarray:
+    x, y, z, w = _normalize_quaternion(quaternion, "quaternion")
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+            [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+            [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _matrix_to_quaternion(rotation: np.ndarray) -> np.ndarray:
+    """Project a near-rotation to SO(3), then return normalized ``(x,y,z,w)``."""
+    matrix = _project_to_so3(rotation)
+    m00, m01, m02 = matrix[0]
+    m10, m11, m12 = matrix[1]
+    m20, m21, m22 = matrix[2]
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        quaternion = np.array(
+            [(m21 - m12) / scale, (m02 - m20) / scale, (m10 - m01) / scale, 0.25 * scale]
+        )
+    elif m00 > m11 and m00 > m22:
+        scale = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+        quaternion = np.array(
+            [0.25 * scale, (m01 + m10) / scale, (m02 + m20) / scale, (m21 - m12) / scale]
+        )
+    elif m11 > m22:
+        scale = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+        quaternion = np.array(
+            [(m01 + m10) / scale, 0.25 * scale, (m12 + m21) / scale, (m02 - m20) / scale]
+        )
+    else:
+        scale = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+        quaternion = np.array(
+            [(m02 + m20) / scale, (m12 + m21) / scale, 0.25 * scale, (m10 - m01) / scale]
+        )
+    return _normalize_quaternion(quaternion, "matrix quaternion")
+
+
+def _require_pose_shape_finite(pose: np.ndarray, name: str) -> np.ndarray:
+    """Cheap per-frame guard without rejecting small rotation drift.
+
+    ``vr_teleop``'s WristTracker performs no matrix validation on its per-frame
+    wrist input, so update() only rejects the programming errors the public API
+    contract promises (wrong shape / non-finite) without the expensive
+    orthonormality + determinant checks that would crash on inputs the original
+    tolerated.
+    """
+    value = np.asarray(pose, dtype=np.float64)
+    if value.shape != _POSE_SHAPE:
+        raise ValueError(f"{name} must have shape (4, 4), got {value.shape}")
+    if not np.all(np.isfinite(value)):
+        raise ValueError(f"{name} must contain only finite values")
+    if not np.allclose(value[3], [0.0, 0.0, 0.0, 1.0], atol=1e-7):
+        raise ValueError(f"{name} must have homogeneous last row [0, 0, 0, 1]")
+    return value
 
 
 class VRRelativePoseTracker:
@@ -87,6 +188,7 @@ class VRRelativePoseTracker:
         ema_alpha: float = 0.8,
         position_deadband: float = 0.0,
         rotation_deadband_deg: float = 0.0,
+        negate_rot_xy: bool = False,
     ) -> None:
         if not np.isfinite(position_scale) or position_scale <= 0.0:
             raise ValueError("position_scale must be finite and greater than zero")
@@ -106,6 +208,7 @@ class VRRelativePoseTracker:
         self._ema_alpha = float(ema_alpha)
         self._position_deadband = float(position_deadband)
         self._rotation_deadband_rad = math.radians(rotation_deadband_deg)
+        self._negate_rot_xy = bool(negate_rot_xy)
 
         self._initial_ee_pose = _validate_pose(initial_ee_pose, "initial_ee_pose")
         self._target_pose = self._initial_ee_pose.copy()
@@ -146,9 +249,9 @@ class VRRelativePoseTracker:
 
     def update(self, wrist_pose_xr: np.ndarray) -> np.ndarray:
         """Update and return the target H1 end-effector pose."""
-        wrist = _validate_pose(wrist_pose_xr, "wrist_pose_xr")
+        wrist = _require_pose_shape_finite(wrist_pose_xr, "wrist_pose_xr")
         if self._reference_wrist_pose is None:
-            self._reference_wrist_pose = wrist
+            self._reference_wrist_pose = wrist.copy()
             return self.target_pose
 
         translation = self._basis @ (
@@ -164,17 +267,39 @@ class VRRelativePoseTracker:
         if np.linalg.norm(self._smoothed_translation) < self._position_deadband:
             self._smoothed_translation = np.zeros(3, dtype=np.float64)
 
-        rotation_xr = (
-            wrist[:3, :3] @ self._reference_wrist_pose[:3, :3].T
+        current_robot_rotation = self._basis @ _project_to_so3(
+            wrist[:3, :3]
+        ) @ self._basis.T
+        reference_robot_rotation = self._basis @ _project_to_so3(
+            self._reference_wrist_pose[:3, :3]
+        ) @ self._basis.T
+        current_quaternion = _matrix_to_quaternion(current_robot_rotation)
+        reference_quaternion = _matrix_to_quaternion(reference_robot_rotation)
+        relative_quaternion = _quaternion_multiply(
+            current_quaternion, _quaternion_inverse(reference_quaternion)
         )
-        rotation_robot = self._basis @ rotation_xr @ self._basis.T
-        if _rotation_angle(rotation_robot) < self._rotation_deadband_rad:
-            rotation_robot = np.eye(3)
-        self._rotation_residual = rotation_robot
+        if self._negate_rot_xy:
+            relative_quaternion[:2] *= -1.0
+        relative_quaternion = _normalize_quaternion(
+            relative_quaternion, "relative quaternion"
+        )
+        rotation_angle = 2.0 * math.atan2(
+            np.linalg.norm(relative_quaternion[:3]),
+            abs(relative_quaternion[3]),
+        )
+        if rotation_angle < self._rotation_deadband_rad:
+            relative_quaternion = np.array([0.0, 0.0, 0.0, 1.0])
+        self._rotation_residual = _quaternion_to_matrix(relative_quaternion)
 
         target = self._initial_ee_pose.copy()
         target[:3, 3] += self._position_scale * self._smoothed_translation
-        target[:3, :3] = rotation_robot @ self._initial_ee_pose[:3, :3]
+        initial_ee_quaternion = _matrix_to_quaternion(
+            self._initial_ee_pose[:3, :3]
+        )
+        target_quaternion = _quaternion_multiply(
+            relative_quaternion, initial_ee_quaternion
+        )
+        target[:3, :3] = _quaternion_to_matrix(target_quaternion)
         self._target_pose = target
         return self.target_pose
 
@@ -200,26 +325,26 @@ class LMIKResult:
 
 
 def _rotation_error(target_rotation: np.ndarray, current_rotation: np.ndarray) -> np.ndarray:
-    """Return the shortest SO(3) axis-angle error vector."""
-    target = _validate_rotation(target_rotation, "target_rotation")
-    current = _validate_rotation(current_rotation, "current_rotation")
+    """Return the shortest SO(3) axis-angle error vector.
+
+    Operates directly on the supplied matrices without re-validating
+    orthonormality.  This runs once per arm on every LM iteration; its inputs
+    are either validated once at the solver boundary or produced by MuJoCo
+    forward kinematics (orthonormal by construction).  This matches the
+    validation-free inner loop of ``vr_teleop``'s ``ik._rotation_error``.
+    """
+    target = np.asarray(target_rotation, dtype=np.float64)
+    current = np.asarray(current_rotation, dtype=np.float64)
     relative = target @ current.T
     cosine = np.clip((np.trace(relative) - 1.0) * 0.5, -1.0, 1.0)
     angle = float(np.arccos(cosine))
     if angle < 1e-8:
         return np.zeros(3, dtype=np.float64)
 
-    if math.pi - angle < 1e-6:
-        eigenvalues, eigenvectors = np.linalg.eig(relative)
-        index = int(np.argmin(np.abs(eigenvalues - 1.0)))
-        axis = np.real(eigenvectors[:, index])
-        norm = np.linalg.norm(axis)
-        if norm < 1e-12:
-            raise ValueError("could not determine rotation axis near pi")
-        axis /= norm
-        return axis * angle
-
-    axis = np.array(
+    # The antisymmetric part equals ``2 * sin(angle) * axis`` for any angle in
+    # [0, pi], so it fixes the axis sign whenever it is not numerically
+    # degenerate (i.e. away from pi).
+    antisymmetric = np.array(
         [
             relative[2, 1] - relative[1, 2],
             relative[0, 2] - relative[2, 0],
@@ -227,7 +352,26 @@ def _rotation_error(target_rotation: np.ndarray, current_rotation: np.ndarray) -
         ],
         dtype=np.float64,
     )
-    axis /= 2.0 * math.sin(angle)
+
+    if math.pi - angle < 1e-6:
+        # Near pi the antisymmetric part vanishes, so recover the axis
+        # magnitude from the eigenvector of ``relative`` for eigenvalue +1.
+        # ``np.linalg.eig`` does not fix the eigenvector sign, so disambiguate
+        # it with the antisymmetric part, which is a non-negative multiple of
+        # the true axis for angle in (pi - 1e-6, pi].  At exactly pi the sign
+        # is physically irrelevant (rotation by pi about +axis == about -axis).
+        eigenvalues, eigenvectors = np.linalg.eig(relative)
+        index = int(np.argmin(np.abs(eigenvalues - 1.0)))
+        axis = np.real(eigenvectors[:, index])
+        norm = np.linalg.norm(axis)
+        if norm < 1e-12:
+            raise ValueError("could not determine rotation axis near pi")
+        axis /= norm
+        if np.dot(axis, antisymmetric) < 0.0:
+            axis = -axis
+        return axis * angle
+
+    axis = antisymmetric / (2.0 * math.sin(angle))
     return axis * angle
 
 
@@ -291,6 +435,46 @@ def _damped_least_squares_step(
         raise ValueError("damping must be finite and greater than zero")
     regularized = jac @ jac.T + damping * np.eye(jac.shape[0])
     return jac.T @ np.linalg.solve(regularized, err)
+
+
+def _augment_regularization(
+    task_error: np.ndarray,
+    task_jacobian: np.ndarray,
+    current_q: np.ndarray,
+    initial_q: np.ndarray,
+    home_qpos: np.ndarray | None,
+    home_weight: float,
+    current_q_weight: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Append home-pose and current-pose regularization rows to the LM system.
+
+    Mirrors ``vr_teleop``'s ``solve_pose_ik``: each term contributes
+    ``sqrt(weight) * (reference - q)`` residual rows with identity Jacobian
+    blocks against the active arm DOFs.  The home term pulls toward
+    ``home_qpos``; the current term penalizes deviation from ``initial_q`` (the
+    solve's starting arm state, not the per-iteration ``q``).  With the default
+    ``home_qpos=None`` and ``current_q_weight=0.0`` this is a no-op, matching the
+    original defaults.
+    """
+    error = task_error
+    jacobian = task_jacobian
+    n = current_q.shape[0]
+
+    if home_qpos is not None and home_weight > 0.0:
+        scale = math.sqrt(home_weight)
+        err_home = scale * (home_qpos - current_q)
+        jac_home = scale * np.eye(n, jacobian.shape[1])
+        error = np.concatenate([error, err_home])
+        jacobian = np.vstack([jacobian, jac_home])
+
+    if current_q_weight > 0.0:
+        scale = math.sqrt(current_q_weight)
+        err_curr = scale * (initial_q - current_q)
+        jac_curr = scale * np.eye(n, jacobian.shape[1])
+        error = np.concatenate([error, err_curr])
+        jacobian = np.vstack([jacobian, jac_curr])
+
+    return error, jacobian
 
 
 def _load_mujoco() -> Any:
@@ -521,8 +705,19 @@ class H1MuJoCoLMIK:
         tolerance: float = 1e-4,
         rotation_weight: float = 1.0,
         damping: float = 1e-3,
+        home_qpos: np.ndarray | None = None,
+        home_weight: float = 0.01,
+        current_q_weight: float = 0.0,
     ) -> LMIKResult:
-        """Solve stacked left/right H1 tool targets from the measured arm state."""
+        """Solve stacked left/right H1 tool targets from the measured arm state.
+
+        ``home_qpos``/``home_weight`` and ``current_q_weight`` mirror
+        ``vr_teleop``'s ``solve_pose_ik`` regularization: a home-pose pull-back
+        (only active when ``home_qpos`` is provided) and a penalty on deviating
+        from the initial ``current_arm_q``.  Both terms extend to the stacked
+        14-DOF dual-arm system.  They influence only the joint-space step; the
+        convergence test uses the task-space error alone, matching the original.
+        """
         arm_q = self._validate_arm_q(current_arm_q)
         if not isinstance(max_iters, int) or max_iters <= 0:
             raise ValueError("max_iters must be a positive integer")
@@ -532,6 +727,17 @@ class H1MuJoCoLMIK:
             raise ValueError("rotation_weight must be finite and non-negative")
         if not np.isfinite(damping) or damping <= 0.0:
             raise ValueError("damping must be finite and greater than zero")
+        if not np.isfinite(home_weight) or home_weight < 0.0:
+            raise ValueError("home_weight must be finite and non-negative")
+        if not np.isfinite(current_q_weight) or current_q_weight < 0.0:
+            raise ValueError("current_q_weight must be finite and non-negative")
+        home_vec: np.ndarray | None = None
+        if home_qpos is not None:
+            home_vec = np.asarray(home_qpos, dtype=np.float64)
+            if home_vec.shape != (_H1_ARM_DOF,):
+                raise ValueError(f"home_qpos must contain {_H1_ARM_DOF} values")
+            if not np.all(np.isfinite(home_vec)):
+                raise ValueError("home_qpos must contain only finite values")
         left_target = _validate_pose(left_target_pose, "left_target_pose")
         right_target = _validate_pose(right_target_pose, "right_target_pose")
 
@@ -561,8 +767,17 @@ class H1MuJoCoLMIK:
                 iterations = iteration - 1
                 break
 
+            step_error, step_jacobian = _augment_regularization(
+                weighted_error,
+                jacobian,
+                qpos[self._qpos_addresses],
+                arm_q,
+                home_vec,
+                home_weight,
+                current_q_weight,
+            )
             active_dq = _damped_least_squares_step(
-                jacobian, weighted_error, damping
+                step_jacobian, step_error, damping
             )
             full_dq = np.zeros(self._model.nv, dtype=np.float64)
             full_dq[self._dof_addresses] = active_dq
