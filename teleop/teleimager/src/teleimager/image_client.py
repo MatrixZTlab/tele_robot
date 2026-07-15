@@ -286,7 +286,11 @@ class ZMQ_PublisherManager:
 # ========================================================
 class TeleImage:
     _NOT_SET = object()
-    __slots__ = ['jpg', '_bgr', '_depth', 'depth_shape', 'depth_dtype', 'timestamp_ns', 'fps']
+    __slots__ = [
+        'jpg', '_bgr', '_depth', 'depth_shape', 'depth_dtype',
+        'timestamp_ns', 'received_monotonic_ns', 'received_wall_ns',
+        'sequence', 'metadata', 'fps',
+    ]
 
     def __init__(self, fps: float, jpg: Optional[bytes], bgr: Any = _NOT_SET,
                  depth: Any = None, depth_shape: Optional[Tuple[int, int]] = None,
@@ -298,6 +302,10 @@ class TeleImage:
         self.depth_shape = depth_shape
         self.depth_dtype = depth_dtype
         self.timestamp_ns = timestamp_ns
+        self.received_monotonic_ns = None
+        self.received_wall_ns = None
+        self.sequence = None
+        self.metadata = {}
 
     @property
     def bgr(self) -> Optional[np.ndarray]:
@@ -366,6 +374,8 @@ class ZMQ_SubscriberThread(threading.Thread):
         self._socket = None
         self._running = True
         self._started = threading.Event()
+        self._listener_lock = threading.Lock()
+        self._packet_listeners = []
 
         self._frame_3ring_buffer = TripleRingBuffer()
         self._fps_monitor = SimpleFPSMonitor(window_size=10)
@@ -390,6 +400,25 @@ class ZMQ_SubscriberThread(threading.Thread):
             logger_mp.warning(f"[ZMQ_SubscriberThread] Failed to decode image: {e}")
             return None
 
+    def add_packet_listener(self, listener) -> None:
+        with self._listener_lock:
+            if listener not in self._packet_listeners:
+                self._packet_listeners.append(listener)
+
+    def remove_packet_listener(self, listener) -> None:
+        with self._listener_lock:
+            if listener in self._packet_listeners:
+                self._packet_listeners.remove(listener)
+
+    def _notify_packet_listeners(self, frame_packet) -> None:
+        with self._listener_lock:
+            listeners = tuple(self._packet_listeners)
+        for listener in listeners:
+            try:
+                listener(frame_packet)
+            except Exception as exc:
+                logger_mp.warning(f"Camera packet listener failed: {exc}")
+
     def _decoder_loop(self):
         while self._running:
             try:
@@ -398,7 +427,12 @@ class ZMQ_SubscriberThread(threading.Thread):
                     continue
                 jpg_bytes = frame_packet.get("jpg") if isinstance(frame_packet, dict) else frame_packet
                 img_numpy = self._decode_image(jpg_bytes)
-                self._bgr_3ring_buffer.write(img_numpy)
+                # Keep the decoded image and its source packet together. Reading
+                # them from separate latest-frame buffers can pair frame N's BGR
+                # image with frame N+1's timestamp and depth payload.
+                decoded_packet = dict(frame_packet) if isinstance(frame_packet, dict) else {"jpg": frame_packet}
+                decoded_packet["bgr"] = img_numpy
+                self._bgr_3ring_buffer.write(decoded_packet)
                 self._bgr_decode_queue.task_done()
             except queue.Empty:
                 continue
@@ -417,7 +451,11 @@ class ZMQ_SubscriberThread(threading.Thread):
             The latest message as a TeleImage object containing raw bytes, decoded BGR image (if enabled), and FPS.
         """
         current_fps = self._fps_monitor.fps
-        frame_packet = self._frame_3ring_buffer.read()
+        frame_packet = (
+            self._bgr_3ring_buffer.read()
+            if self._request_bgr
+            else self._frame_3ring_buffer.read()
+        )
         if isinstance(frame_packet, dict):
             jpg_data = frame_packet.get("jpg")
             depth_data = frame_packet.get("depth")
@@ -426,21 +464,30 @@ class ZMQ_SubscriberThread(threading.Thread):
                 depth_shape = tuple(depth_shape)
             depth_dtype = frame_packet.get("depth_dtype", "uint16")
             timestamp_ns = frame_packet.get("timestamp_ns")
+            received_monotonic_ns = frame_packet.get("received_monotonic_ns")
+            received_wall_ns = frame_packet.get("received_wall_ns")
+            bgr_data = frame_packet.get("bgr") if self._request_bgr else TeleImage._NOT_SET
         else:
             jpg_data = frame_packet
             depth_data = None
             depth_shape = None
             depth_dtype = "uint16"
             timestamp_ns = None
-        if not self._request_bgr:
-            return TeleImage(fps=current_fps, jpg=jpg_data, depth=depth_data,
-                             depth_shape=depth_shape, depth_dtype=depth_dtype,
-                             timestamp_ns=timestamp_ns)
-
-        bgr_data = self._bgr_3ring_buffer.read()
-        return TeleImage(fps=current_fps, jpg=jpg_data, bgr=bgr_data,
-                         depth=depth_data, depth_shape=depth_shape,
-                         depth_dtype=depth_dtype, timestamp_ns=timestamp_ns)
+            received_monotonic_ns = None
+            received_wall_ns = None
+            bgr_data = None if self._request_bgr else TeleImage._NOT_SET
+        image = TeleImage(fps=current_fps, jpg=jpg_data, bgr=bgr_data,
+                          depth=depth_data, depth_shape=depth_shape,
+                          depth_dtype=depth_dtype, timestamp_ns=timestamp_ns)
+        image.received_monotonic_ns = received_monotonic_ns
+        image.received_wall_ns = received_wall_ns
+        if isinstance(frame_packet, dict):
+            image.sequence = frame_packet.get("sequence")
+            image.metadata = {
+                key: value for key, value in frame_packet.items()
+                if key not in ("jpg", "depth", "bgr")
+            }
+        return image
 
     def stop(self) -> None:
         """Stop the subscriber thread gracefully."""
@@ -469,14 +516,19 @@ class ZMQ_SubscriberThread(threading.Thread):
                 if self._socket in events:
                     try:
                         raw_msg = self._socket.recv()
-                        frame_packet = raw_msg
+                        received_monotonic_ns = time.monotonic_ns()
+                        received_wall_ns = time.time_ns()
+                        frame_packet = {"jpg": raw_msg}
                         if not raw_msg.startswith(b"\xff\xd8"):
                             try:
                                 loaded = pickle.loads(raw_msg)
                                 if isinstance(loaded, dict):
                                     frame_packet = loaded
                             except Exception:
-                                frame_packet = raw_msg
+                                frame_packet = {"jpg": raw_msg}
+                        frame_packet["received_monotonic_ns"] = received_monotonic_ns
+                        frame_packet["received_wall_ns"] = received_wall_ns
+                        self._notify_packet_listeners(frame_packet)
                         # write to 3-ring-buffer
                         self._frame_3ring_buffer.write(frame_packet)
                         # enqueue for decoding if needed
@@ -574,6 +626,14 @@ class ZMQ_SubscriberManager:
 
         subscriber_thread = self._get_subscriber_thread(host, port, request_bgr=request_bgr)
         return subscriber_thread.recv()
+
+    def add_packet_listener(self, host: str, port: int, listener, request_bgr: bool = False) -> None:
+        subscriber = self._get_subscriber_thread(host, port, request_bgr=request_bgr)
+        subscriber.add_packet_listener(listener)
+
+    def remove_packet_listener(self, host: str, port: int, listener, request_bgr: bool = False) -> None:
+        subscriber = self._get_subscriber_thread(host, port, request_bgr=request_bgr)
+        subscriber.remove_packet_listener(listener)
 
     def close(self) -> None:
         """Close all subscribers."""
@@ -755,6 +815,8 @@ class ImageClient:
         if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
 
+        self._packet_listeners = {}
+
     # --------------------------------------------------------
     # public api
     # --------------------------------------------------------
@@ -773,6 +835,31 @@ class ImageClient:
         if not self._cam_config.get('right_wrist_camera', {}).get('enable_zmq', False):
             return None
         return self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
+
+    def add_packet_listener(self, camera_name: str, listener) -> None:
+        config = self._cam_config.get(camera_name, {})
+        if not config.get("enable_zmq", False):
+            return
+
+        def named_listener(packet):
+            listener(camera_name, packet)
+
+        self._packet_listeners[(camera_name, listener)] = named_listener
+        self._subscriber_manager.add_packet_listener(
+            self._host, config["zmq_port"], named_listener,
+            request_bgr=self._request_bgr,
+        )
+
+    def remove_packet_listener(self, camera_name: str, listener) -> None:
+        named_listener = self._packet_listeners.pop((camera_name, listener), None)
+        if named_listener is None:
+            return
+        config = self._cam_config.get(camera_name, {})
+        if config.get("enable_zmq", False):
+            self._subscriber_manager.remove_packet_listener(
+                self._host, config["zmq_port"], named_listener,
+                request_bgr=self._request_bgr,
+            )
         
     def close(self):
         self._subscriber_manager.close()

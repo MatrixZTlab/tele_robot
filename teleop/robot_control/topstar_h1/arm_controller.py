@@ -51,11 +51,18 @@ class H1ArmController(BaseArmController):
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
         self.last_published_q = np.zeros(14)
+        self.last_target_update_ns = 0
+        self.last_target_update_wall_ns = 0
+        self.last_lowcmd_publish_ns = 0
+        self.last_target_to_lowcmd_ms = None
+        self._target_sequence = 0
+        self._published_sequence = 0
         self.head_target = np.zeros(2)
         self.last_published_head_q = np.zeros(2)
         self.torso_target = np.zeros(2)   # [torso_lift, torso_pitch] (hw convention)
         self.last_published_torso = np.zeros(2)
         self._ee_gripper_state = [0.0, 0.0]
+        self._raw_event_sink = None
 
         # ROS2
         if not rclpy.ok():
@@ -103,7 +110,35 @@ class H1ArmController(BaseArmController):
         with self.publish_lock:
             self.q_target = values
             self.tauff_target = tau
+            self.last_target_update_ns = time.monotonic_ns()
+            self.last_target_update_wall_ns = time.time_ns()
+            self._target_sequence += 1
         self.publish_event.set()
+
+    def set_raw_event_sink(self, sink) -> None:
+        """Attach a non-blocking sink accepting ``(stream_name, event)``."""
+        self._raw_event_sink = sink
+        self._ros_node.set_state_event_sink(self._emit_lowstate_event if sink else None)
+
+    def _emit_lowstate_event(self, msg, timing) -> None:
+        if self._raw_event_sink is None:
+            return
+        q_hw = np.asarray(
+            [msg.motor_state[index].q for index in self.left_slots]
+            + [msg.motor_state[index].q for index in self.right_slots],
+            dtype=float,
+        )
+        dq_hw = np.asarray(
+            [msg.motor_state[index].dq for index in self.left_slots]
+            + [msg.motor_state[index].dq for index in self.right_slots],
+            dtype=float,
+        )
+        self._raw_event_sink('lowstate', {
+            **timing,
+            'clock_domain': 'robot_source_or_ros_host_receive',
+            'q': self._hw_to_sim_arm(q_hw).tolist(),
+            'dq': self._hw_to_sim_arm(dq_hw).tolist(),
+        })
 
     def get_current_dual_arm_q(self):
         state = self._ros_node.state_buffer.get()
@@ -115,6 +150,21 @@ class H1ArmController(BaseArmController):
         for i, idx in enumerate(self.right_slots):
             res[7 + i] = state.motor_state[idx].q
         return self._hw_to_sim_arm(res)
+
+    def get_current_dual_arm_state(self):
+        """Return q, dq, and the receipt time from one atomic LowState snapshot."""
+        state, receive_ns = self._ros_node.state_buffer.get_with_timestamp()
+        if state is None:
+            return np.zeros(14), np.zeros(14), 0
+        q = np.zeros(14)
+        dq = np.zeros(14)
+        for i, idx in enumerate(self.left_slots):
+            q[i] = state.motor_state[idx].q
+            dq[i] = state.motor_state[idx].dq
+        for i, idx in enumerate(self.right_slots):
+            q[7 + i] = state.motor_state[idx].q
+            dq[7 + i] = state.motor_state[idx].dq
+        return self._hw_to_sim_arm(q), self._hw_to_sim_arm(dq), receive_ns
 
     def get_current_dual_arm_dq(self):
         state = self._ros_node.state_buffer.get()
@@ -156,9 +206,21 @@ class H1ArmController(BaseArmController):
         self.publish_event.set()
 
     def set_ee_gripper(self, arm_idx, value):
+        command_monotonic_ns = time.monotonic_ns()
+        command_wall_ns = time.time_ns()
         with self.publish_lock:
             self._ee_gripper_state[arm_idx] = float(value)
+            ee_state = list(self._ee_gripper_state)
         self._ros_node.publish_gripper_cmd(arm_idx, float(value))
+        if self._raw_event_sink is not None:
+            self._raw_event_sink('ee_command', {
+                'sequence': int(command_monotonic_ns),
+                'publish_monotonic_ns': command_monotonic_ns,
+                'publish_wall_ns': command_wall_ns,
+                'arm_idx': int(arm_idx),
+                'value': float(value),
+                'state_right_left': ee_state,
+            })
         self.publish_event.set()
 
     def move_joints_timed(self, joints, duration):
@@ -305,6 +367,10 @@ class H1ArmController(BaseArmController):
                     cur_q = self.last_published_q.copy()
                     cur_head = self.last_published_head_q.copy()
                     cur_torso = self.last_published_torso.copy()
+                    target_sequence = self._target_sequence
+                    target_update_ns = self.last_target_update_ns
+                    target_update_wall_ns = self.last_target_update_wall_ns
+                    ee_tgt = list(self._ee_gripper_state)
 
                 # 臂部限速 + 坐标转换
                 q_clipped = self._clip_arm_q_target(q_tgt, cur_q, self.dq_limit)
@@ -371,6 +437,28 @@ class H1ArmController(BaseArmController):
                 self._ros_node.compute_lowcmd_crc(msg)
                 self._ros_node.cmd_pub.publish(msg)
                 self._last_publish_time = time.time()
+                publish_wall_ns = time.time_ns()
+                with self.publish_lock:
+                    publish_ns = time.monotonic_ns()
+                    self.last_lowcmd_publish_ns = publish_ns
+                    self.last_target_to_lowcmd_ms = (
+                        (publish_ns - target_update_ns) / 1e6
+                        if target_update_ns > 0 else None
+                    )
+                    self._published_sequence = target_sequence
+                if self._raw_event_sink is not None:
+                    self._raw_event_sink('lowcmd', {
+                        'sequence': int(target_sequence),
+                        'target_update_monotonic_ns': int(target_update_ns),
+                        'target_update_wall_ns': int(target_update_wall_ns),
+                        'publish_monotonic_ns': int(publish_ns),
+                        'publish_wall_ns': int(publish_wall_ns),
+                        'q_ik_target': q_tgt.tolist(),
+                        'q_commanded': q_clipped.tolist(),
+                        'q_commanded_hw': q_hw.tolist(),
+                        'ee_command_right_left': ee_tgt,
+                        'dq_limit_rad_s': float(self.dq_limit),
+                    })
 
             except Exception:
                 _exception_count += 1

@@ -31,15 +31,21 @@ class DataBuffer:
 
     def __init__(self):
         self._data = None
+        self._timestamp_ns = 0
         self._lock = threading.Lock()
 
-    def set(self, data):
+    def set(self, data, timestamp_ns=0):
         with self._lock:
             self._data = data
+            self._timestamp_ns = int(timestamp_ns or 0)
 
     def get(self):
         with self._lock:
             return self._data
+
+    def get_with_timestamp(self):
+        with self._lock:
+            return self._data, self._timestamp_ns
 
 
 class BaseRosNode(Node):

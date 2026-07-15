@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-depth", action="store_true", help="Skip depth streams.")
     parser.add_argument("--no-videos", action="store_true", help="Store image features as images instead of videos.")
     parser.add_argument("--overwrite", action="store_true", help="Delete output directory before exporting.")
+    parser.add_argument(
+        "--allow-invalid-alignment",
+        action="store_true",
+        help="Export aligned episodes even when alignment_report.json marks them invalid.",
+    )
     return parser.parse_args()
 
 
@@ -74,6 +79,23 @@ def load_episode(episode_dir: Path) -> dict[str, Any]:
     if not episode.get("data"):
         raise ValueError(f"Episode has no frames: {episode_dir}")
     return episode
+
+
+def validate_alignment_report(episode_dir: Path, allow_invalid: bool) -> None:
+    report_path = episode_dir / "alignment_report.json"
+    if allow_invalid or not report_path.exists():
+        return
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    failures = []
+    if report.get("quality_valid") is False:
+        failures.extend(report.get("quality_issues") or ["quality_invalid"])
+    if report.get("source_clock_valid") is False:
+        failures.extend(report.get("source_clock_issues") or ["source_clock_invalid"])
+    if failures:
+        raise ValueError(
+            f"Refusing to export invalid aligned episode {episode_dir}: "
+            + ", ".join(str(item) for item in failures)
+        )
 
 
 def flatten_numeric_tree(tree: Any, prefix: str = "") -> tuple[list[float], list[str]]:
@@ -236,6 +258,8 @@ def alignment_record(episode_index: int, frame_index: int, frame: dict[str, Any]
 
 def write_dataset(args: argparse.Namespace) -> Path:
     episode_dirs = find_episode_dirs(args.input_dir, args.task_name)
+    for episode_dir in episode_dirs:
+        validate_alignment_report(episode_dir, args.allow_invalid_alignment)
     episodes = [(episode_dir, load_episode(episode_dir)) for episode_dir in episode_dirs]
     fps, tolerance_s = source_fps_and_tolerance(episodes)
     fps = args.fps if args.fps is not None else fps

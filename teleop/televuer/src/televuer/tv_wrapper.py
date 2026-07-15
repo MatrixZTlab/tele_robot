@@ -95,6 +95,12 @@ class TeleData:
     head_pose: np.ndarray                  # (4,4) SE(3) pose, OpenXR convention, raw
     left_wrist_pose: np.ndarray            # (4,4) SE(3) pose, OpenXR convention, raw
     right_wrist_pose: np.ndarray           # (4,4) SE(3) pose, OpenXR convention, raw
+    left_wrist_valid: bool = False         # False means wrist_pose is the safe fallback
+    right_wrist_valid: bool = False        # False means wrist_pose is the safe fallback
+    controller_pose_timestamp_ns: int = 0  # monotonic clock, updated on WebSocket input
+    controller_pose_wall_ns: int = 0       # host wall clock at WebSocket receipt
+    controller_pose_sequence: int = 0
+    controller_source_timestamp_raw: float = 0.0
     # hand tracking
     left_hand_pos: np.ndarray = None       # (25,3) OpenXR convention, raw
     right_hand_pos: np.ndarray = None      # (25,3) OpenXR convention, raw
@@ -212,6 +218,10 @@ class TeleVuerWrapper:
         self._init_head_pose = None
         self._pending_init_capture = False
 
+    def drain_raw_xr_events(self, max_items=512):
+        """Return every queued XR event, not only the latest control snapshot."""
+        return self.tvuer.drain_xr_events(max_items=max_items)
+
     def capture_init_head_pose(self):
         """Request that the next valid head frame be frozen as the initial head reference."""
         self._init_head_pose = None
@@ -294,6 +304,12 @@ class TeleVuerWrapper:
                 head_pose=head_pose,
                 left_wrist_pose=left_wrist,
                 right_wrist_pose=right_wrist,
+                left_wrist_valid=left_valid,
+                right_wrist_valid=right_valid,
+                controller_pose_timestamp_ns=self.tvuer.controller_pose_timestamp_ns,
+                controller_pose_wall_ns=self.tvuer.controller_pose_wall_ns,
+                controller_pose_sequence=self.tvuer.controller_pose_sequence,
+                controller_source_timestamp_raw=self.tvuer.controller_source_timestamp_raw,
                 left_hand_pos=left_hand_pos,
                 right_hand_pos=right_hand_pos,
                 left_hand_rot=left_hand_rot,
@@ -322,6 +338,12 @@ class TeleVuerWrapper:
                 head_pose=head_pose,
                 left_wrist_pose=left_wrist,
                 right_wrist_pose=right_wrist,
+                left_wrist_valid=left_valid,
+                right_wrist_valid=right_valid,
+                controller_pose_timestamp_ns=self.tvuer.controller_pose_timestamp_ns,
+                controller_pose_wall_ns=self.tvuer.controller_pose_wall_ns,
+                controller_pose_sequence=self.tvuer.controller_pose_sequence,
+                controller_source_timestamp_raw=self.tvuer.controller_source_timestamp_raw,
                 left_ctrl_trigger=self.tvuer.left_ctrl_trigger,
                 left_ctrl_triggerValue=10.0 - self.tvuer.left_ctrl_triggerValue * 10,
                 left_ctrl_squeeze=self.tvuer.left_ctrl_squeeze,

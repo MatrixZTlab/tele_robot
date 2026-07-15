@@ -1,6 +1,7 @@
 """TOPSTAR_H1 ROS2 节点 — 从旧 topstar_h1_sim_arm_controller.py 提取。"""
 import json
 import threading
+import time
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -26,9 +27,41 @@ class H1RosNode(BaseRosNode):
         self._gripper_left_pub = self.create_publisher(GripperCmd, '/hand/left/cmd', 10)
 
         self.state_buffer = DataBuffer()
+        self.last_state_receive_ns = 0
+        self._state_sequence = 0
+        self._state_event_sink = None
+
+    def set_state_event_sink(self, sink):
+        self._state_event_sink = sink
+
+    @staticmethod
+    def _source_timestamp_ns(msg):
+        header = getattr(msg, 'header', None)
+        stamp = getattr(header, 'stamp', None)
+        if stamp is not None:
+            sec = getattr(stamp, 'sec', None)
+            nanosec = getattr(stamp, 'nanosec', None)
+            if sec is not None and nanosec is not None:
+                return int(sec) * 1_000_000_000 + int(nanosec)
+        value = getattr(msg, 'timestamp_ns', None)
+        return int(value) if value is not None else None
 
     def state_cb(self, msg: LowState):
-        self.state_buffer.set(msg)
+        receive_ns = time.monotonic_ns()
+        receive_wall_ns = time.time_ns()
+        self._state_sequence += 1
+        self.state_buffer.set(msg, receive_ns)
+        self.last_state_receive_ns = receive_ns
+        if self._state_event_sink is not None:
+            try:
+                self._state_event_sink(msg, {
+                    'sequence': self._state_sequence,
+                    'source_timestamp_ns': self._source_timestamp_ns(msg),
+                    'host_receive_monotonic_ns': receive_ns,
+                    'host_receive_wall_ns': receive_wall_ns,
+                })
+            except Exception:
+                pass
 
     def publish_base_cmd(self, vx: float, vy: float, vyaw: float):
         msg = Twist()

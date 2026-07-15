@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -40,6 +41,8 @@ class RobotDriver(ABC):
         self._init_right_ee: Optional[np.ndarray] = None
         # 回放时上一次 gripper 指令（未下发新指令时保持上一状态）
         self._last_ee_action: Optional[list] = None
+        self.last_step_timing_ms: dict[str, float] = {}
+        self.last_step_alignment_ns: dict[str, int] = {}
 
         # 子类构建
         self._build_components()
@@ -98,15 +101,24 @@ class RobotDriver(ABC):
         流程：状态获取 → XR 变换 → IK 求解 → 命令分发 → 录制收集
         根据 tele_data.teleop_mode 在 relative_head 和 relative_pose 模式间分支。
         """
+        step_start = time.perf_counter_ns()
         # ① 状态
-        current_q = self.controller.get_current_dual_arm_q()
-        current_dq = self.controller.get_current_dual_arm_dq()
+        if hasattr(self.controller, 'get_current_dual_arm_state'):
+            current_q, current_dq, state_receive_ns = (
+                self.controller.get_current_dual_arm_state()
+            )
+        else:
+            current_q = self.controller.get_current_dual_arm_q()
+            current_dq = self.controller.get_current_dual_arm_dq()
+            state_receive_ns = 0
+        state_done = time.perf_counter_ns()
 
         teleop_mode = getattr(tele_data, 'teleop_mode', 'relative_head')
 
         if teleop_mode == "relative_head":
             # ── 现有管线 ──
             xr = self.xr_transformer.transform(tele_data, self.control_mode.value)
+            transform_done = time.perf_counter_ns()
             ik_result = self.ik.solve_ik(
                 xr.left_wrist_pose, xr.right_wrist_pose,
                 current_q, current_dq,
@@ -151,6 +163,7 @@ class RobotDriver(ABC):
                 self._init_left_ee = None
 
             # relative_pose 模式不做头部 IK
+            transform_done = time.perf_counter_ns()
             ik_result = self.ik.solve_ik(
                 left_target, right_target,
                 current_q, current_dq,
@@ -168,20 +181,36 @@ class RobotDriver(ABC):
         else:
             # fallback: relative_head
             xr = self.xr_transformer.transform(tele_data, self.control_mode.value)
+            transform_done = time.perf_counter_ns()
             ik_result = self.ik.solve_ik(
                 xr.left_wrist_pose, xr.right_wrist_pose,
                 current_q, current_dq,
                 **xr.head_kwargs,
             )
+        ik_done = time.perf_counter_ns()
 
         # ④ 命令分发
         self._dispatch_commands(ik_result)
+        dispatch_done = time.perf_counter_ns()
 
         # ⑤ 收尾回调
         self._on_step_done(ik_result, tele_data)
 
         # ⑦ 录制快照
-        return self._collect_recording_state(ik_result, current_q)
+        snapshot = self._collect_recording_state(ik_result, current_q)
+        collect_done = time.perf_counter_ns()
+        self.last_step_timing_ms = {
+            "state": (state_done - step_start) / 1e6,
+            "transform": (transform_done - state_done) / 1e6,
+            "ik": (ik_done - transform_done) / 1e6,
+            "dispatch": (dispatch_done - ik_done) / 1e6,
+            "collect": (collect_done - dispatch_done) / 1e6,
+            "total": (collect_done - step_start) / 1e6,
+        }
+        self.last_step_alignment_ns = {
+            "state_receive_monotonic": int(state_receive_ns or 0),
+        }
+        return snapshot
 
     def reset_relative_pose_state(self, side: str = 'both') -> None:
         """当外层激活臂或切换模式时调用，强制清除 _init_ee 以便 step() 重新捕获 FK 基准。

@@ -3,10 +3,12 @@ import socket
 import subprocess
 from vuer import Vuer
 from vuer.schemas import ImageBackground, Hands, MotionControllers, WebRTCVideoPlane, WebRTCStereoVideoPlane
-from multiprocessing import Value, Array, Process, shared_memory
+from multiprocessing import Value, Array, Process, Queue, shared_memory
+import queue as std_queue
 import numpy as np
 import asyncio
 import threading
+import time
 import cv2
 import os
 from pathlib import Path
@@ -174,6 +176,12 @@ class TeleVuer:
         self.head_pose_shared = Array('d', 16, lock=True)
         self.left_arm_pose_shared = Array('d', 16, lock=True)
         self.right_arm_pose_shared = Array('d', 16, lock=True)
+        self.controller_pose_timestamp_ns_shared = Value('q', 0, lock=True)
+        self.controller_pose_wall_ns_shared = Value('q', 0, lock=True)
+        self.controller_pose_sequence_shared = Value('q', 0, lock=True)
+        self.controller_source_timestamp_raw_shared = Value('d', 0.0, lock=True)
+        self.xr_event_drop_count_shared = Value('q', 0, lock=True)
+        self.xr_event_queue = Queue(maxsize=1024)
         if self.use_hand_tracking:
             self.left_hand_position_shared = Array('d', 75, lock=True)
             self.right_hand_position_shared = Array('d', 75, lock=True)
@@ -280,6 +288,64 @@ class TeleVuer:
         except:
             pass
 
+    @staticmethod
+    def _source_timestamp_from_event(value):
+        if not isinstance(value, dict):
+            return None, None
+        for key in ("timestamp_ns", "timestamp", "predictedDisplayTime", "time"):
+            raw = value.get(key)
+            if isinstance(raw, (int, float)):
+                return float(raw), key
+        return None, None
+
+    def _enqueue_xr_event(self, kind, value, monotonic_ns, wall_ns, sequence):
+        source_timestamp_raw, source_timestamp_key = self._source_timestamp_from_event(value)
+        left_pose = value.get("left") if isinstance(value, dict) else None
+        right_pose = value.get("right") if isinstance(value, dict) else None
+        if kind == "hand":
+            left_pose = left_pose[:16] if left_pose is not None else None
+            right_pose = right_pose[:16] if right_pose is not None else None
+        with self.xr_event_drop_count_shared.get_lock():
+            producer_drop_count = int(self.xr_event_drop_count_shared.value)
+        payload = {
+            "kind": kind,
+            "sequence": int(sequence),
+            "source_timestamp_raw": source_timestamp_raw,
+            "source_timestamp_key": source_timestamp_key,
+            "host_receive_monotonic_ns": int(monotonic_ns),
+            "host_receive_wall_ns": int(wall_ns),
+            "left_pose": left_pose,
+            "right_pose": right_pose,
+            "left_state": value.get("leftState") if isinstance(value, dict) else None,
+            "right_state": value.get("rightState") if isinstance(value, dict) else None,
+            "producer_drop_count": producer_drop_count,
+        }
+        try:
+            self.xr_event_queue.put_nowait(payload)
+        except std_queue.Full:
+            try:
+                self.xr_event_queue.get_nowait()
+                self.xr_event_queue.put_nowait(payload)
+            except (std_queue.Empty, std_queue.Full):
+                pass
+            with self.xr_event_drop_count_shared.get_lock():
+                self.xr_event_drop_count_shared.value += 1
+
+    def _mark_xr_pose_received(self, kind, value):
+        monotonic_ns = time.monotonic_ns()
+        wall_ns = time.time_ns()
+        with self.controller_pose_sequence_shared.get_lock():
+            self.controller_pose_sequence_shared.value += 1
+            sequence = self.controller_pose_sequence_shared.value
+        source_timestamp_raw, _ = self._source_timestamp_from_event(value)
+        with self.controller_pose_timestamp_ns_shared.get_lock():
+            self.controller_pose_timestamp_ns_shared.value = monotonic_ns
+        with self.controller_pose_wall_ns_shared.get_lock():
+            self.controller_pose_wall_ns_shared.value = wall_ns
+        with self.controller_source_timestamp_raw_shared.get_lock():
+            self.controller_source_timestamp_raw_shared.value = source_timestamp_raw or 0.0
+        self._enqueue_xr_event(kind, value, monotonic_ns, wall_ns, sequence)
+
     async def on_controller_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html"""
         try:
@@ -316,6 +382,7 @@ class TeleVuer:
 
             extract_controllers(left_controller, "left")
             extract_controllers(right_controller, "right")
+            self._mark_xr_pose_received("controller", event.value)
         except:
             pass
 
@@ -362,6 +429,7 @@ class TeleVuer:
             extract_hand_poses(right_hand_data, self.right_arm_pose_shared, self.right_hand_position_shared, self.right_hand_orientation_shared)
             extract_hands(left_hand, "left")
             extract_hands(right_hand, "right")
+            self._mark_xr_pose_received("hand", event.value)
 
         except:
             pass
@@ -748,6 +816,36 @@ class TeleVuer:
         """np.ndarray, shape (4, 4), right arm SE(3) pose matrix from Vuer (basis OpenXR Convention)."""
         with self.right_arm_pose_shared.get_lock():
             return np.array(self.right_arm_pose_shared[:]).reshape(4, 4, order="F")
+
+    @property
+    def controller_pose_timestamp_ns(self):
+        """Monotonic timestamp when the latest controller WebSocket frame arrived."""
+        with self.controller_pose_timestamp_ns_shared.get_lock():
+            return int(self.controller_pose_timestamp_ns_shared.value)
+
+    @property
+    def controller_pose_wall_ns(self):
+        with self.controller_pose_wall_ns_shared.get_lock():
+            return int(self.controller_pose_wall_ns_shared.value)
+
+    @property
+    def controller_pose_sequence(self):
+        with self.controller_pose_sequence_shared.get_lock():
+            return int(self.controller_pose_sequence_shared.value)
+
+    @property
+    def controller_source_timestamp_raw(self):
+        with self.controller_source_timestamp_raw_shared.get_lock():
+            return float(self.controller_source_timestamp_raw_shared.value)
+
+    def drain_xr_events(self, max_items=512):
+        events = []
+        for _ in range(max_items):
+            try:
+                events.append(self.xr_event_queue.get_nowait())
+            except std_queue.Empty:
+                break
+        return events
 
     # ==================== Hand Tracking Data ====================
     @property

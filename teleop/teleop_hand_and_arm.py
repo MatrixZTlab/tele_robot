@@ -1,6 +1,7 @@
 import time
 import argparse
 import json
+from collections import deque
 from multiprocessing import Value, Array, Lock
 import threading
 import numpy as np
@@ -22,11 +23,8 @@ from teleop.robot_control._base.control_mode import ControlMode
 from teleimager.image_client import ImageClient
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.record import Recorder, RecorderManager
-from teleop.utils.lerobot_episode_writer import (
-    LeRobotEpisodeWriter,
-    build_camera_key_plan,
-    default_repo_id,
-)
+from teleop.utils.episode_writer import EpisodeWriter
+from teleop.utils.raw_session_writer import RawSessionWriter
 import queue as _queue
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -141,8 +139,13 @@ _prev_right_a_relative = False
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, TELEOP_ACTIVE, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE
+    global STOP, TELEOP_ACTIVE, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE, RECORD_TOGGLE
     global _base_tgt_vx, _base_tgt_vy, _base_tgt_wz, KEY_W, KEY_A, KEY_S, KEY_D, KEY_Q, KEY_E
+    # Unitree recording semantics take precedence over the optional keyboard
+    # chassis binding: while teleop is active, s toggles one dataset episode.
+    if key == 's' and TELEOP_ACTIVE and args.record:
+        RECORD_TOGGLE = True
+        return
     # ── 键盘底盘控制（按住时持续移动）──
     # 注意: 'q' 兼顾左转+退出；优先退出（未激活遥操时），激活时左转
     if MOTION_ACTIVE and key not in ('q',):
@@ -182,32 +185,12 @@ def on_press(key):
             logger_mp.info(f"🔄 Teleop mode switched to: {TELEOP_MODE}")
         else:
             logger_mp.warning("Cannot switch mode while teleop is active. Stop teleop first.")
-    elif key == 's' and TELEOP_ACTIVE:
-        # Save current session and start a new one
-        if 'recorder_manager' in globals() and recorder_manager is not None:
-            try:
-                recorder_manager.stop_program()
-                if 'episode_writer' in globals() and episode_writer is not None:
-                    episode_writer.save_episode()
-                logger_mp.info("Recording session saved.")
-                recorder_manager.ensure_program_active(
-                    program_name=args.task_name,
-                    description=args.task_desc,
-                    filepath=os.path.join(args.task_dir, args.task_name),
-                )
-                if 'episode_writer' in globals() and episode_writer is not None:
-                    episode_writer.create_episode()
-                logger_mp.info("New recording session started.")
-            except Exception:
-                logger_mp.exception("Failed to save/restart recording session")
     elif key == 'v' and TELEOP_ACTIVE:
         # Toggle ServoJ recording
         if 'recorder_manager' in globals() and recorder_manager is not None:
             try:
                 if getattr(recorder_manager.recorder, '_servo_recording', False):
                     recorder_manager.stop_servo_recording()
-                    if 'episode_writer' in globals() and episode_writer is not None:
-                        episode_writer.save_episode()
                     logger_mp.info("ServoJ recording STOPPED")
                 else:
                     recorder_manager.ensure_program_active(
@@ -216,8 +199,6 @@ def on_press(key):
                         filepath=os.path.join(args.task_dir, args.task_name),
                     )
                     recorder_manager.start_servo_recording()
-                    if 'episode_writer' in globals() and episode_writer is not None:
-                        episode_writer.create_episode()
                     logger_mp.info("ServoJ recording STARTED")
             except Exception:
                 logger_mp.exception("Failed to toggle ServoJ recording")
@@ -367,15 +348,12 @@ def _publish_torso_cmd(tele_data=None):
 
 def get_state() -> dict:
     """Return current heartbeat state"""
-    global TELEOP_ACTIVE, STOP, READY, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE
-    is_servo = False
-    if 'recorder_manager' in globals() and recorder_manager is not None:
-        is_servo = getattr(recorder_manager.recorder, '_servo_recording', False)
+    global TELEOP_ACTIVE, STOP, READY, RECORD_RUNNING, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE
     return {
         "START": TELEOP_ACTIVE,
         "STOP": STOP,
         "READY": READY,
-        "RECORD_RUNNING": is_servo,
+        "RECORD_RUNNING": RECORD_RUNNING,
         "TELEOP_MODE": TELEOP_MODE,
         "LEFT_ARM_ACTIVE": LEFT_ARM_ACTIVE,
         "RIGHT_ARM_ACTIVE": RIGHT_ARM_ACTIVE,
@@ -406,20 +384,30 @@ if __name__ == '__main__':
     parser.add_argument('--replay-file', dest='replay_file', type=str, default=None, help='Path to trajectory JSON file for replay')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
+    parser.add_argument('--no-raw-record', dest='raw_record', action='store_false',
+                        help='Disable independent raw sensor stream recording')
+    parser.set_defaults(raw_record=True)
+    parser.add_argument('--raw-record-queue-size', type=int, default=8192,
+                        help='Maximum queued raw sensor events before drops are counted')
     parser.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
     parser.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
     parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording metadata')
-    parser.add_argument('--lerobot-repo-id', type=str, default=None, help='LeRobot dataset repo id metadata, defaults to local/<task-name>')
-    parser.add_argument('--sync-tolerance-s', type=float, default=1e-4,
-                        help='LeRobot-style timestamp tolerance metadata for recorded samples')
-    parser.add_argument('--camera-sync-tolerance-s', type=float, default=0.02,
-                        help='Maximum allowed software timestamp skew between camera frames')
     # ── Body / Chassis 运动参数（依赖 --motion，对齐 jog GUI）──
     parser.add_argument('--body-max-speed',         type=float, default=1.0,  help='Global speed scaling factor (0~1), like jog GUI slider')
     # ── 其他 ──
     parser.add_argument('--arm-scale', type=float, default=1.0, help='Arm reach scaling factor (e.g., 0.8)')
+    parser.add_argument('--latency-profile', action='store_true',
+                        help='Print Pico, XR, IK, LowCmd, and LowState timing once per second')
+    parser.add_argument('--camera-sync-tolerance-s', type=float, default=0.02,
+                        help='Maximum receive-time skew between camera streams for alignment metadata')
+    parser.add_argument('--max-camera-age-s', type=float, default=0.10,
+                        help='Maximum camera frame age at control start for alignment metadata')
+    parser.add_argument('--max-pico-age-s', type=float, default=0.10,
+                        help='Maximum Pico pose age at control start for alignment metadata')
+    parser.add_argument('--max-state-age-s', type=float, default=0.10,
+                        help='Maximum LowState age after robot.step for alignment metadata')
 
     args = parser.parse_args()
     logger_mp.info(f"args: {args}")
@@ -441,6 +429,8 @@ if __name__ == '__main__':
         logger_mp.info(f"Robot driver ready: {robot.config.model_name}, "
                        f"mode={control_mode.value}, "
                        f"controller={type(robot.controller).__name__}")
+        if args.latency_profile:
+            logger_mp.info("Latency profile enabled; timing is printed once per second")
         # 为后向兼容保留 arm_ctrl 引用
         arm_ctrl = robot.controller
         arm_ik = robot.ik
@@ -536,6 +526,7 @@ if __name__ == '__main__':
 
         # record + headless / non-headless mode
         if args.record:
+            raw_writer = None
             # trajectory recorder + manager: samples arm joint states and writes trajectory JSON
             try:
                 recorder = Recorder(buffer_size=1000)
@@ -561,32 +552,59 @@ if __name__ == '__main__':
             except Exception:
                 logger_mp.exception('Failed to initialize trajectory recorder')
 
-            # Multi-modal dataset writer: samples RGB/depth images + states/actions
-            # directly into a LeRobotDataset. Alignment timing details are stored
-            # as a sidecar under meta/tele_robot_alignment.jsonl.
+            # Match Unitree xr_teleoperate recording: each episode is written as
+            # episode_XXXX/{colors,depths,data.json}. Conversion to LeRobot is a
+            # separate offline step, so recording never depends on video encoding.
             try:
-                lerobot_root = os.path.join(args.task_dir, args.task_name, "lerobot")
-                # Fixed camera->key plan: each enabled camera keeps the same
-                # color_N/depth_N key for the whole session so a dropped frame
-                # never renumbers another camera's stream.
-                camera_key_plan = build_camera_key_plan(camera_config)
-                expected_color_keys = [entry["color_key"] for entry in camera_key_plan]
-                expected_depth_keys = [
-                    entry["depth_key"] for entry in camera_key_plan if entry["depth_key"]
-                ]
-                episode_writer = LeRobotEpisodeWriter(
-                    root=lerobot_root,
-                    repo_id=args.lerobot_repo_id or default_repo_id(args.task_name),
-                    fps=args.frequency,
-                    task=args.task_goal or args.task_name,
-                    robot_type=robot.config.model_name,
-                    tolerance_s=args.sync_tolerance_s,
-                    use_videos=True,
-                    expected_color_keys=expected_color_keys,
-                    expected_depth_keys=expected_depth_keys,
+                image_height, image_width = camera_config['head_camera']['image_shape']
+                episode_writer = EpisodeWriter(
+                    task_dir=os.path.join(args.task_dir, args.task_name),
+                    task_goal=args.task_goal,
+                    task_desc=args.task_desc,
+                    task_steps=args.task_steps,
+                    frequency=args.frequency,
+                    image_size=[image_width, image_height],
+                    rerun_log=not args.headless,
                 )
             except Exception:
-                logger_mp.exception('Failed to initialize LeRobot dataset writer')
+                logger_mp.exception('Failed to initialize Unitree-style episode writer')
+
+            if args.raw_record:
+                try:
+                    task_path = os.path.join(args.task_dir, args.task_name)
+                    raw_writer = RawSessionWriter(
+                        task_path,
+                        queue_size=args.raw_record_queue_size,
+                    )
+                    if img_client is not None:
+                        for camera_name in (
+                            'head_camera', 'left_wrist_camera', 'right_wrist_camera'
+                        ):
+                            img_client.add_packet_listener(
+                                camera_name, raw_writer.append_camera_packet
+                            )
+                    if hasattr(arm_ctrl, 'set_raw_event_sink'):
+                        arm_ctrl.set_raw_event_sink(raw_writer.append_event)
+                    logger_mp.info(
+                        "Raw asynchronous recording enabled under %s/raw",
+                        task_path,
+                    )
+                except Exception:
+                    logger_mp.exception('Failed to initialize raw stream writer')
+                    raise
+
+            def _drain_raw_xr_events():
+                if raw_writer is None:
+                    return
+                for event in tv_wrapper.drain_raw_xr_events():
+                    raw_writer.append_event('pico', event)
+        else:
+            raw_writer = None
+
+            def _drain_raw_xr_events():
+                # Drain the multiprocessing queue even when recording is off so
+                # an old backlog cannot enter a later episode.
+                tv_wrapper.drain_raw_xr_events()
 
         # replay mode: if requested, set up Replay + adapter + consumer and run replay then exit
         if args.replay is not None:
@@ -819,6 +837,9 @@ if __name__ == '__main__':
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter TELEOP_ACTIVE state
+        last_latency_profile_log = 0.0
+        published_action_history = deque()
+        last_profiled_publish_ns = 0
 
         # 启动时回零一次，后续进入/退出遥操保持当前姿态
         arm_ctrl.go_home()
@@ -832,6 +853,7 @@ if __name__ == '__main__':
                     tv_wrapper.render_to_xr(head_img)
                 try:
                     tele_data = tv_wrapper.get_tele_data()
+                    _drain_raw_xr_events()
 
                     # ── Right A: 统一 press 跟踪 + 短按/长按检测 ──
                     #  短按: release < 3s → arm toggle (relative_pose) / enter teleop (relative_head)
@@ -901,28 +923,13 @@ if __name__ == '__main__':
                             robot.reset_relative_pose_state('left')
                             logger_mp.info("XR Right A: Right hand → Left arm activated")
 
-                    # ── 等待循环中支持录制控制 ──
-                    # Left B/Y: 切换 ServoJ 连续轨迹录制
+                    # Left B/Y mirrors the official s-key dataset toggle.
                     if args.record and hasattr(tele_data, 'left_ctrl_bButton') and tele_data.left_ctrl_bButton:
                         if not getattr(tv_wrapper, '_prev_left_ctrl_bButton', False):
-                            try:
-                                if getattr(recorder_manager.recorder, '_servo_recording', False):
-                                    recorder_manager.stop_servo_recording()
-                                    if 'episode_writer' in globals() and episode_writer is not None:
-                                        episode_writer.save_episode()
-                                    logger_mp.info("XR Left B/Y: ServoJ recording STOPPED")
-                                else:
-                                    recorder_manager.ensure_program_active(
-                                        program_name=args.task_name,
-                                        description=args.task_desc,
-                                        filepath=os.path.join(args.task_dir, args.task_name),
-                                    )
-                                    recorder_manager.start_servo_recording()
-                                    if 'episode_writer' in globals() and episode_writer is not None:
-                                        episode_writer.create_episode()
-                                    logger_mp.info("XR Left B/Y: ServoJ recording STARTED")
-                            except Exception:
-                                logger_mp.exception('Failed to toggle ServoJ via XR')
+                            if TELEOP_ACTIVE:
+                                RECORD_TOGGLE = True
+                            else:
+                                logger_mp.warning("Start teleop before starting dataset recording")
                         tv_wrapper._prev_left_ctrl_bButton = True
                     else:
                         tv_wrapper._prev_left_ctrl_bButton = False
@@ -982,23 +989,37 @@ if __name__ == '__main__':
                 if args.record and RECORD_TOGGLE:
                     RECORD_TOGGLE = False
                     if not RECORD_RUNNING:
-                        RECORD_RUNNING = True
-                        try:
-                            # start trajectory recording program
-                            recorder_manager.start_program(args.task_name, args.task_desc, filepath=os.path.join(args.task_dir, args.task_name), frequency=args.frequency)
-                        except Exception:
-                            logger_mp.exception('Failed to start trajectory recording program')
+                        if episode_writer.create_episode():
+                            if raw_writer is not None:
+                                raw_writer.start_episode(
+                                    episode_writer.episode_id,
+                                    metadata={
+                                        'task_name': args.task_name,
+                                        'task_goal': args.task_goal,
+                                        'frequency_hz': args.frequency,
+                                        'robot': args.robot,
+                                        'control_mode': args.control_mode,
+                                        'input_mode': args.input_mode,
+                                        'image_server_ip': args.img_server_ip,
+                                        'camera_config': camera_config,
+                                    },
+                                )
+                            RECORD_RUNNING = True
+                            READY = False
+                            logger_mp.info("Dataset recording STARTED")
+                        else:
+                            logger_mp.error("Failed to create episode; recording not started")
                     else:
                         RECORD_RUNNING = False
-                        try:
-                            recorder_manager.stop_program()
-                            episode_path = getattr(recorder, 'current_file', None)
-                            if episode_path is not None:
-                                logger_mp.info(f"⏹️ Stopping Recording... Trajectory saved to: {episode_path}")
-                        except Exception:
-                            logger_mp.exception('Failed to stop trajectory recording program')
+                        if raw_writer is not None:
+                            raw_dir = raw_writer.stop_episode()
+                            logger_mp.info("Raw streams flushed: %s", raw_dir)
+                        episode_writer.save_episode()
+                        logger_mp.info("Dataset recording STOPPED; episode is being saved")
                         if args.sim:
                             pass  # sim reset TODO
+                if args.record:
+                    READY = episode_writer.is_ready()
 
                 # servo toggle (press 'v' to toggle ServoJ recording when recording)
                 if args.record and SERVO_TOGGLE:
@@ -1016,6 +1037,7 @@ if __name__ == '__main__':
 
                 # get xr's tele data
                 tele_data = tv_wrapper.get_tele_data()
+                _drain_raw_xr_events()
 
                 # ── Right A: 统一 press 跟踪 + 短按/长按检测 ──
                 #  短按: release < 3s → arm toggle (relative_pose)
@@ -1115,28 +1137,10 @@ if __name__ == '__main__':
                 # ── Pass teleop_mode to tele_data for RobotDriver ──
                 tele_data.teleop_mode = TELEOP_MODE
 
-                # ── XR B/Y buttons: 录制控制 ──────────────────────────
-                # Left B/Y: 切换 ServoJ 连续轨迹录制
+                # Left B/Y is an XR alias for the official s-key dataset toggle.
                 if args.record and hasattr(tele_data, 'left_ctrl_bButton') and tele_data.left_ctrl_bButton:
                     if not getattr(tv_wrapper, '_prev_left_ctrl_bButton', False):
-                        try:
-                            if getattr(recorder_manager.recorder, '_servo_recording', False):
-                                recorder_manager.stop_servo_recording()
-                                if 'episode_writer' in globals() and episode_writer is not None:
-                                    episode_writer.save_episode()
-                                logger_mp.info("XR Left B/Y: ServoJ recording STOPPED")
-                            else:
-                                recorder_manager.ensure_program_active(
-                                    program_name=args.task_name,
-                                    description=args.task_desc,
-                                    filepath=os.path.join(args.task_dir, args.task_name),
-                                )
-                                recorder_manager.start_servo_recording()
-                                if 'episode_writer' in globals() and episode_writer is not None:
-                                    episode_writer.create_episode()
-                                logger_mp.info("XR Left B/Y: ServoJ recording STARTED")
-                        except Exception:
-                            logger_mp.exception('Failed to toggle ServoJ via XR')
+                        RECORD_TOGGLE = True
                     tv_wrapper._prev_left_ctrl_bButton = True
                 else:
                     tv_wrapper._prev_left_ctrl_bButton = False
@@ -1162,45 +1166,165 @@ if __name__ == '__main__':
 
                 # ── 统一控制管线（RobotDriver）──
                 control_cycle_timestamp_ns = time.time_ns()
+                profile_control_start_ns = time.monotonic_ns()
+                pico_timestamp_ns = getattr(
+                    tele_data, 'controller_pose_timestamp_ns', 0
+                )
+                profile_pico_age_ms = None
+                if args.latency_profile:
+                    if pico_timestamp_ns > 0:
+                        profile_pico_age_ms = (
+                            profile_control_start_ns - pico_timestamp_ns
+                        ) / 1e6
                 recording_snapshot = robot.step(tele_data)
                 robot_step_done_timestamp_ns = time.time_ns()
+                robot_step_done_monotonic_ns = time.monotonic_ns()
+                if raw_writer is not None and raw_writer.active:
+                    raw_writer.append_event('control', {
+                        'sequence': int(getattr(tele_data, 'controller_pose_sequence', 0)),
+                        'control_start_wall_ns': int(control_cycle_timestamp_ns),
+                        'control_start_monotonic_ns': int(profile_control_start_ns),
+                        'control_done_wall_ns': int(robot_step_done_timestamp_ns),
+                        'control_done_monotonic_ns': int(robot_step_done_monotonic_ns),
+                        'pico_receive_monotonic_ns': int(pico_timestamp_ns or 0),
+                        'pico_receive_wall_ns': int(
+                            getattr(tele_data, 'controller_pose_wall_ns', 0) or 0
+                        ),
+                        'timing_ms': dict(robot.last_step_timing_ms),
+                    })
+
+                if args.latency_profile:
+                    profile_now_ns = time.monotonic_ns()
+                    with arm_ctrl.publish_lock:
+                        published_q = arm_ctrl.last_published_q.copy()
+                        target_update_ns = arm_ctrl.last_target_update_ns
+                        lowcmd_publish_ns = arm_ctrl.last_lowcmd_publish_ns
+                        last_target_to_lowcmd_ms = arm_ctrl.last_target_to_lowcmd_ms
+                    if (
+                        lowcmd_publish_ns > 0
+                        and lowcmd_publish_ns != last_profiled_publish_ns
+                    ):
+                        published_action_history.append(
+                            (lowcmd_publish_ns, published_q)
+                        )
+                        last_profiled_publish_ns = lowcmd_publish_ns
+                    while (
+                        published_action_history
+                        and profile_now_ns - published_action_history[0][0]
+                        > 3_000_000_000
+                    ):
+                        published_action_history.popleft()
+
+                    now_s = time.monotonic()
+                    if now_s - last_latency_profile_log >= 1.0:
+                        last_latency_profile_log = now_s
+                        state_timestamp_ns = getattr(
+                            arm_ctrl._ros_node, 'last_state_receive_ns', 0
+                        )
+                        lowstate_age_ms = (
+                            (profile_now_ns - state_timestamp_ns) / 1e6
+                            if state_timestamp_ns > 0 else None
+                        )
+                        if last_target_to_lowcmd_ms is not None:
+                            lowcmd_text = f"{last_target_to_lowcmd_ms:.1f}ms"
+                        elif target_update_ns > 0:
+                            lowcmd_text = (
+                                f"pending {(profile_now_ns - target_update_ns) / 1e6:.1f}ms"
+                            )
+                        else:
+                            lowcmd_text = "n/a"
+
+                        state_q = np.asarray(
+                            recording_snapshot.get('left_arm_state', [])
+                            + recording_snapshot.get('right_arm_state', []),
+                            dtype=float,
+                        )
+                        follow_text = "n/a"
+                        if state_q.shape == (14,) and published_action_history:
+                            targets = np.stack(
+                                [item[1] for item in published_action_history]
+                            )
+                            if float(np.max(np.ptp(targets, axis=0))) > 0.02:
+                                errors = np.mean(np.abs(targets - state_q), axis=1)
+                                best_index = int(np.argmin(errors))
+                                best_timestamp_ns, _ = published_action_history[best_index]
+                                follow_lag_ms = (
+                                    profile_now_ns - best_timestamp_ns
+                                ) / 1e6
+                                follow_text = (
+                                    f"~{follow_lag_ms:.0f}ms "
+                                    f"(MAE {errors[best_index]:.3f}rad)"
+                                )
+
+                        timing = robot.last_step_timing_ms
+                        logger_mp.info(
+                            "[LATENCY] Pico->control-start=%s | "
+                            "XR=%.1fms IK=%.1fms dispatch=%.1fms total=%.1fms | "
+                            "last target->LowCmd=%s | LowState age=%s | "
+                            "action->LowState=%s",
+                            "n/a" if profile_pico_age_ms is None else f"{profile_pico_age_ms:.1f}ms",
+                            timing.get('transform', float('nan')),
+                            timing.get('ik', float('nan')),
+                            timing.get('dispatch', float('nan')),
+                            timing.get('total', float('nan')),
+                            lowcmd_text,
+                            "n/a" if lowstate_age_ms is None else f"{lowstate_age_ms:.1f}ms",
+                            follow_text,
+                        )
 
                 # ── 录制（机器人无关）──
-                if args.record and getattr(recorder_manager.recorder, '_servo_recording', False):
+                if args.record and RECORD_RUNNING:
                     try:
                         colors = {}
                         depths = {}
-                        camera_timestamps_ns = {}
-                        # Each physical camera writes to its FIXED key from the
-                        # plan (built once from camera_config). A camera that
-                        # missed this frame simply leaves its key absent — it can
-                        # never take over another camera's color_N/depth_N index.
-                        camera_images = {
-                            "head": head_img,
-                            "left_wrist": left_wrist_img,
-                            "right_wrist": right_wrist_img,
-                        }
-                        for entry in camera_key_plan:
-                            img = camera_images.get(entry["source"])
-                            if img is None or getattr(img, 'bgr', None) is None:
+                        camera_source_wall_ns = {}
+                        camera_receive_monotonic_ns = {}
+                        camera_receive_wall_ns = {}
+                        expected_color_keys = []
+                        camera_streams = [
+                            ('head_camera', head_img),
+                            ('left_wrist_camera', left_wrist_img),
+                            ('right_wrist_camera', right_wrist_img),
+                        ]
+                        stream_index = 0
+                        for camera_name, image in camera_streams:
+                            config = camera_config.get(camera_name, {})
+                            if not config.get('enable_zmq', False):
                                 continue
-                            bgr = img.bgr
-                            depth = getattr(img, 'depth', None)
-                            half = entry["half"]
-                            if half is not None:
-                                # Binocular frame: split into left/right halves.
-                                w = camera_config[entry["cam"]]['image_shape'][1]
-                                half_w = w // 2
-                                col_slice = slice(None, half_w) if half == 0 else slice(half_w, None)
-                                colors[entry["color_key"]] = bgr[:, col_slice]
-                                if entry["depth_key"] and depth is not None:
-                                    depths[entry["depth_key"]] = depth[:, col_slice]
+                            stream_count = 2 if config.get('binocular', False) else 1
+                            stream_keys = [
+                                f'color_{stream_index + offset}'
+                                for offset in range(stream_count)
+                            ]
+                            expected_color_keys.extend(stream_keys)
+                            if image is None or getattr(image, 'bgr', None) is None:
+                                stream_index += stream_count
+                                continue
+
+                            bgr = image.bgr
+                            depth = getattr(image, 'depth', None)
+                            source_wall_ns = getattr(image, 'timestamp_ns', None)
+                            receive_monotonic_ns = getattr(image, 'received_monotonic_ns', None)
+                            receive_wall_ns = getattr(image, 'received_wall_ns', None)
+                            for stream_key in stream_keys:
+                                if source_wall_ns is not None:
+                                    camera_source_wall_ns[stream_key] = int(source_wall_ns)
+                                if receive_monotonic_ns is not None:
+                                    camera_receive_monotonic_ns[stream_key] = int(receive_monotonic_ns)
+                                if receive_wall_ns is not None:
+                                    camera_receive_wall_ns[stream_key] = int(receive_wall_ns)
+                            if config.get('binocular', False):
+                                half_width = bgr.shape[1] // 2
+                                for half, col_slice in enumerate((slice(None, half_width), slice(half_width, None))):
+                                    colors[f'color_{stream_index + half}'] = bgr[:, col_slice]
+                                    if config.get('enable_depth', False) and depth is not None:
+                                        depths[f'depth_{stream_index + half}'] = depth[:, col_slice]
+                                stream_index += 2
                             else:
-                                colors[entry["color_key"]] = bgr
-                                if entry["depth_key"] and depth is not None:
-                                    depths[entry["depth_key"]] = depth
-                            if getattr(img, 'timestamp_ns', None) is not None:
-                                camera_timestamps_ns[entry["color_key"]] = img.timestamp_ns
+                                colors[f'color_{stream_index}'] = bgr
+                                if config.get('enable_depth', False) and depth is not None:
+                                    depths[f'depth_{stream_index}'] = depth
+                                stream_index += 1
 
                         # 构建 states/actions（与 RobotDriver._collect_recording_state 对齐）
                         left_arm_state = recording_snapshot.get("left_arm_state", [])
@@ -1211,44 +1335,138 @@ if __name__ == '__main__':
                         body_action = recording_snapshot.get("body_action", [])
                         ee_action = recording_snapshot.get("ee_action", [])
 
+                        # TOPSTAR suction state ordering is [right, left]. Map
+                        # it into Unitree's side-specific EE schema.
+                        right_ee_action = [ee_action[0]] if len(ee_action) > 0 else []
+                        left_ee_action = [ee_action[1]] if len(ee_action) > 1 else []
+                        right_ee_state = list(right_ee_action)
+                        left_ee_state = list(left_ee_action)
+
+                        # The TOPSTAR snapshot historically duplicated all 14
+                        # arm joints under body. Unitree's schema keeps arm and
+                        # body disjoint, so discard that duplicate payload.
+                        arm_state = left_arm_state + right_arm_state
+                        arm_action = left_arm_action + right_arm_action
+                        if body_state == arm_state:
+                            body_state = []
+                        if body_action in (arm_state, arm_action):
+                            body_action = []
+
                         states = {
                             "left_arm": {"qpos": left_arm_state, "qvel": [], "torque": []},
                             "right_arm": {"qpos": right_arm_state, "qvel": [], "torque": []},
-                            "left_ee": {"qpos": [], "qvel": [], "torque": []},
-                            "right_ee": {"qpos": [], "qvel": [], "torque": []},
+                            "left_ee": {"qpos": left_ee_state, "qvel": [], "torque": []},
+                            "right_ee": {"qpos": right_ee_state, "qvel": [], "torque": []},
                             "body": {"qpos": body_state},
                         }
                         actions = {
                             "left_arm": {"qpos": left_arm_action, "qvel": [], "torque": []},
                             "right_arm": {"qpos": right_arm_action, "qvel": [], "torque": []},
-                            "left_ee": {"qpos": [], "qvel": [], "torque": []},
-                            "right_ee": {"qpos": [], "qvel": [], "torque": []},
+                            "left_ee": {"qpos": left_ee_action, "qvel": [], "torque": []},
+                            "right_ee": {"qpos": right_ee_action, "qvel": [], "torque": []},
                             "body": {"qpos": body_action},
                         }
-                        camera_ts_values = list(camera_timestamps_ns.values())
-                        camera_sync_skew_s = None
-                        if camera_ts_values:
-                            camera_sync_skew_s = (
-                                max(camera_ts_values) - min(camera_ts_values)
-                            ) / 1_000_000_000.0
-                        alignment = {
-                            "scheme": "lerobot_fps_grid",
-                            "fps": args.frequency,
-                            "tolerance_s": args.sync_tolerance_s,
-                            "camera_sync_tolerance_s": args.camera_sync_tolerance_s,
-                            "actual_timestamps_ns": {
-                                "control_cycle": control_cycle_timestamp_ns,
-                                "robot_step_done": robot_step_done_timestamp_ns,
-                                "cameras": camera_timestamps_ns,
-                            },
-                            "camera_sync_skew_s": camera_sync_skew_s,
-                            "camera_sync_within_tolerance": (
-                                None if camera_sync_skew_s is None
-                                else camera_sync_skew_s <= args.camera_sync_tolerance_s
-                            ),
-                        }
-                        # TODO: 回写 sim_state
+                        lowstate_receive_ns = robot.last_step_alignment_ns.get(
+                            'state_receive_monotonic', 0
+                        )
+                        with arm_ctrl.publish_lock:
+                            action_target_update_ns = int(
+                                arm_ctrl.last_target_update_ns or 0
+                            )
+                        invalid_reasons = []
+                        missing_cameras = sorted(set(expected_color_keys) - set(colors))
+                        if missing_cameras:
+                            invalid_reasons.append(
+                                'missing camera frames: ' + ', '.join(missing_cameras)
+                            )
 
+                        camera_receive_values = list(camera_receive_monotonic_ns.values())
+                        camera_source_values = list(camera_source_wall_ns.values())
+                        camera_receive_skew_ms = None
+                        camera_source_skew_ms = None
+                        max_camera_age_ms = None
+                        if camera_receive_values:
+                            camera_receive_skew_ms = (
+                                max(camera_receive_values) - min(camera_receive_values)
+                            ) / 1e6
+                            max_camera_age_ms = max(
+                                profile_control_start_ns - timestamp
+                                for timestamp in camera_receive_values
+                            ) / 1e6
+                            if camera_receive_skew_ms > args.camera_sync_tolerance_s * 1000:
+                                invalid_reasons.append('camera receive skew exceeded tolerance')
+                            if max_camera_age_ms > args.max_camera_age_s * 1000:
+                                invalid_reasons.append('camera frame age exceeded tolerance')
+                        elif expected_color_keys:
+                            invalid_reasons.append('camera receive timestamps unavailable')
+                        if camera_source_values:
+                            camera_source_skew_ms = (
+                                max(camera_source_values) - min(camera_source_values)
+                            ) / 1e6
+                            if camera_source_skew_ms > args.camera_sync_tolerance_s * 1000:
+                                invalid_reasons.append('camera source skew exceeded tolerance')
+
+                        pico_age_ms = (
+                            (profile_control_start_ns - pico_timestamp_ns) / 1e6
+                            if pico_timestamp_ns > 0 else None
+                        )
+                        lowstate_age_ms = (
+                            (robot_step_done_monotonic_ns - lowstate_receive_ns) / 1e6
+                            if lowstate_receive_ns > 0 else None
+                        )
+                        state_to_action_ms = (
+                            (action_target_update_ns - lowstate_receive_ns) / 1e6
+                            if action_target_update_ns > 0 and lowstate_receive_ns > 0
+                            else None
+                        )
+                        pico_to_action_ms = (
+                            (action_target_update_ns - pico_timestamp_ns) / 1e6
+                            if action_target_update_ns > 0 and pico_timestamp_ns > 0
+                            else None
+                        )
+                        if pico_age_ms is None:
+                            invalid_reasons.append('Pico receive timestamp unavailable')
+                        elif pico_age_ms > args.max_pico_age_s * 1000:
+                            invalid_reasons.append('Pico pose age exceeded tolerance')
+                        if lowstate_age_ms is None:
+                            invalid_reasons.append('LowState receive timestamp unavailable')
+                        elif lowstate_age_ms > args.max_state_age_s * 1000:
+                            invalid_reasons.append('LowState age exceeded tolerance')
+
+                        alignment = {
+                            'scheme': 'local_monotonic_receive_v1',
+                            'valid': not invalid_reasons,
+                            'invalid_reasons': invalid_reasons,
+                            'actual_timestamps_ns': {
+                                'control_cycle_wall': control_cycle_timestamp_ns,
+                                'control_start_monotonic': profile_control_start_ns,
+                                'robot_step_done_wall': robot_step_done_timestamp_ns,
+                                'robot_step_done_monotonic': robot_step_done_monotonic_ns,
+                                'pico_receive_monotonic': pico_timestamp_ns or None,
+                                'lowstate_receive_monotonic': lowstate_receive_ns or None,
+                                'action_target_update_monotonic': action_target_update_ns or None,
+                                'camera_source_wall': camera_source_wall_ns,
+                                'camera_receive_wall': camera_receive_wall_ns,
+                                'camera_receive_monotonic': camera_receive_monotonic_ns,
+                            },
+                            'ages_ms': {
+                                'pico_at_control_start': pico_age_ms,
+                                'max_camera_at_control_start': max_camera_age_ms,
+                                'lowstate_at_step_done': lowstate_age_ms,
+                            },
+                            'camera_receive_skew_ms': camera_receive_skew_ms,
+                            'camera_source_skew_ms': camera_source_skew_ms,
+                            'offsets_ms': {
+                                'state_receive_to_action_target': state_to_action_ms,
+                                'pico_receive_to_action_target': pico_to_action_ms,
+                            },
+                            'thresholds_ms': {
+                                'camera_sync': args.camera_sync_tolerance_s * 1000,
+                                'camera_age': args.max_camera_age_s * 1000,
+                                'pico_age': args.max_pico_age_s * 1000,
+                                'lowstate_age': args.max_state_age_s * 1000,
+                            },
+                        }
                         if 'episode_writer' in globals() and episode_writer is not None:
                             episode_writer.add_item(
                                 colors=colors,
@@ -1280,6 +1498,11 @@ if __name__ == '__main__':
         # 自动停止可能仍在进行的 ServoJ 录制
         if args.record:
             try:
+                if RECORD_RUNNING and 'episode_writer' in locals():
+                    if raw_writer is not None:
+                        raw_writer.stop_episode()
+                    episode_writer.save_episode()
+                    logger_mp.info("Active dataset episode queued for saving.")
                 if getattr(recorder_manager.recorder, '_servo_recording', False):
                     recorder_manager.stop_servo_recording()
                     logger_mp.info("ServoJ recording stopped automatically (teleop exited).")
@@ -1326,6 +1549,13 @@ if __name__ == '__main__':
                 logger_mp.info("Episode writer closed on exit.")
         except Exception as e:
             logger_mp.error(f"Failed to close episode writer on exit: {e}")
+
+        try:
+            if 'raw_writer' in locals() and raw_writer is not None:
+                raw_writer.close()
+                logger_mp.info("Raw stream writer closed on exit.")
+        except Exception as e:
+            logger_mp.error(f"Failed to close raw stream writer on exit: {e}")
 
         # 3. graceful rclpy shutdown (prevents "terminate called without an active exception")
         try:

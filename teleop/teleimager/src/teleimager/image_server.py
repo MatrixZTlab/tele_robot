@@ -955,6 +955,7 @@ class BaseCamera:
         self._img_shape = img_shape # (H, W)
         self._fps = fps
         self._last_timestamp_ns = None
+        self._frame_sequence = 0
         self._enable_zmq = enable_zmq
         self._zmq_port = zmq_port
         if self._enable_zmq:
@@ -1077,13 +1078,38 @@ class OrbbecCamera(BaseCamera):
     
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames(1000)
-        self._last_timestamp_ns = time.time_ns()
+        receive_monotonic_ns = time.monotonic_ns()
+        receive_wall_ns = time.time_ns()
         color_frame = frames.get_color_frame()
         if not color_frame:
             return None
+        self._frame_sequence += 1
+
+        def optional_frame_value(frame, method_name):
+            method = getattr(frame, method_name, None)
+            if not callable(method):
+                return None
+            try:
+                return method()
+            except Exception:
+                return None
+
+        # Orbbec devices expose timestamps in an SDK/device clock domain. Keep
+        # the raw value and its paired host receipt time so the collector can
+        # estimate an affine device->host clock mapping offline.
+        device_timestamp_raw = optional_frame_value(color_frame, "get_timestamp")
+        device_system_timestamp_raw = optional_frame_value(color_frame, "get_system_timestamp")
+        device_frame_index = optional_frame_value(color_frame, "get_frame_index")
+        depth_device_timestamp_raw = None
+        depth_device_system_timestamp_raw = None
+        depth_device_frame_index = None
+        self._last_timestamp_ns = receive_wall_ns
         if self._enable_depth:
             depth_frame = frames.get_depth_frame()
             if depth_frame:
+                depth_device_timestamp_raw = optional_frame_value(depth_frame, "get_timestamp")
+                depth_device_system_timestamp_raw = optional_frame_value(depth_frame, "get_system_timestamp")
+                depth_device_frame_index = optional_frame_value(depth_frame, "get_frame_index")
                 depth_data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16)
                 self._latest_depth = depth_data.reshape(self._img_shape)
             else:
@@ -1097,18 +1123,32 @@ class OrbbecCamera(BaseCamera):
             ok, buf = cv2.imencode(".jpg", bgr_numpy)
             if ok:
                 jpg_bytes = buf.tobytes()
+                payload = {
+                    "type": "rgb",
+                    # Backward-compatible approximate source timestamp.
+                    "timestamp_ns": receive_wall_ns,
+                    "sequence": self._frame_sequence,
+                    "device_frame_index": device_frame_index,
+                    "device_timestamp_raw": device_timestamp_raw,
+                    "device_system_timestamp_raw": device_system_timestamp_raw,
+                    "capture_host_receive_wall_ns": receive_wall_ns,
+                    "capture_host_receive_monotonic_ns": receive_monotonic_ns,
+                    "capture_clock_domain": "orbbec_device_raw",
+                    "jpg": jpg_bytes,
+                }
                 if self._enable_depth and self._latest_depth is not None:
-                    payload = {
+                    payload.update({
                         "type": "rgbd",
-                        "timestamp_ns": self._last_timestamp_ns,
-                        "jpg": jpg_bytes,
                         "depth": self._latest_depth.tobytes(),
                         "depth_shape": list(self._latest_depth.shape),
                         "depth_dtype": str(self._latest_depth.dtype),
-                    }
-                    self._zmq_buffer.write(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
-                else:
-                    self._zmq_buffer.write(jpg_bytes)
+                        "depth_device_frame_index": depth_device_frame_index,
+                        "depth_device_timestamp_raw": depth_device_timestamp_raw,
+                        "depth_device_system_timestamp_raw": depth_device_system_timestamp_raw,
+                    })
+                payload["capture_host_send_wall_ns"] = time.time_ns()
+                payload["capture_host_send_monotonic_ns"] = time.monotonic_ns()
+                self._zmq_buffer.write(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
         
         if not self._ready.is_set():
             self._ready.set()
