@@ -2,11 +2,12 @@ import os
 import cv2
 import json
 import datetime
+import shutil
 import numpy as np
 import time
 from .rerun_visualizer import RerunLogger
 from queue import Queue, Empty
-from threading import Thread
+from threading import Lock, Thread
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 
@@ -58,13 +59,18 @@ class EpisodeWriter():
         self.item_data_queue = Queue(-1)
         self.stop_worker = False
         self.need_save = False  # Flag to indicate when save_episode is triggered
+        self.need_discard = False
+        self._discard_episode_dir = None
+        self._action_in_progress = None
+        self._lifecycle_lock = Lock()
         self.worker_thread = Thread(target=self.process_queue)
         self.worker_thread.start()
 
         logger_mp.info("==> EpisodeWriter initialized successfully.\n")
     
     def is_ready(self):
-        return self.is_available
+        with self._lifecycle_lock:
+            return self.is_available
 
     def data_info(self, version='1.0.0', date=None, author=None):
         self.info = {
@@ -105,7 +111,7 @@ class EpisodeWriter():
         Note:
             Once successfully created, this function will only be available again after save_episode complete its save task.
         """
-        if not self.is_available:
+        if not self.is_ready():
             logger_mp.info("==> The class is currently unavailable for new operations. Please wait until ongoing tasks are completed.")
             return False  # Return False if the class is unavailable
 
@@ -173,9 +179,29 @@ class EpisodeWriter():
             except Empty:
                 pass
         
-            # Check if save_episode was triggered
-            if self.need_save and self.item_data_queue.empty():
-                self._save_episode()
+            if self.item_data_queue.empty():
+                self._finish_pending_episode_action()
+
+    def _finish_pending_episode_action(self):
+        with self._lifecycle_lock:
+            if self.need_discard:
+                self.need_discard = False
+                self.need_save = False
+                episode_dir = self._discard_episode_dir
+                self._discard_episode_dir = None
+                action = "discard"
+            elif self.need_save:
+                self.need_save = False
+                episode_dir = None
+                action = "save"
+            else:
+                return
+            self._action_in_progress = action
+
+        if action == "discard":
+            self._discard_episode(episode_dir)
+        else:
+            self._save_episode()
 
     def _process_item_data(self, item_data):
         idx = item_data['idx']
@@ -223,28 +249,67 @@ class EpisodeWriter():
         """
         Trigger the save operation. This sets the save flag, and the process_queue thread will handle it.
         """
-        self.need_save = True  # Set the save flag
+        with self._lifecycle_lock:
+            self.need_save = True
         logger_mp.info(f"==> Episode saved start...")
+
+    def discard_episode(self, episode_index=None):
+        """Discard the current or most recently saved episode."""
+        target_index = self.episode_id if episode_index is None else int(episode_index)
+        episode_dir = os.path.join(
+            self.task_dir,
+            f"episode_{str(target_index).zfill(4)}",
+        )
+        if target_index < 0 or not os.path.exists(episode_dir):
+            return None
+
+        with self._lifecycle_lock:
+            self.need_discard = True
+            self.need_save = False
+            self._discard_episode_dir = episode_dir
+            self.is_available = False
+        logger_mp.warning(f"==> Episode discard queued: {episode_dir}")
+        return episode_dir
 
     def _save_episode(self):
         """
         Save the episode data to a JSON file.
         """
-        with open(self.json_path, "a", encoding="utf-8") as f:
-            f.write("\n]\n}")      # Close the JSON array and object
+        try:
+            with open(self.json_path, "a", encoding="utf-8") as f:
+                f.write("\n]\n}")      # Close the JSON array and object
+            logger_mp.info(f"==> Episode saved successfully to {self.json_path}.")
+        finally:
+            with self._lifecycle_lock:
+                self._action_in_progress = None
+                if not self.need_discard:
+                    self.is_available = True
 
-        self.need_save = False     # Reset the save flag
-        self.is_available = True   # Mark the class as available after saving
-        logger_mp.info(f"==> Episode saved successfully to {self.json_path}.")
+    def _discard_episode(self, episode_dir):
+        try:
+            if os.path.exists(episode_dir):
+                shutil.rmtree(episode_dir)
+            logger_mp.warning(f"==> Episode discarded: {episode_dir}")
+        except Exception:
+            logger_mp.exception(f"==> Failed to discard episode: {episode_dir}")
+        finally:
+            with self._lifecycle_lock:
+                self._action_in_progress = None
+                self.is_available = True
 
     def close(self):
         """
         Stop the worker thread and ensure all tasks are completed.
         """
         self.item_data_queue.join()
-        if not self.is_available:  # If self.is_available is False, it means there is still data not saved.
+        with self._lifecycle_lock:
+            discard_pending = (
+                self.need_discard or self._action_in_progress == "discard"
+            )
+            save_pending = self.need_save or self._action_in_progress == "save"
+        if not self.is_ready() and not discard_pending and not save_pending:
             self.save_episode()
-        while not self.is_available:
+        while not self.is_ready():
             time.sleep(0.01)
         self.stop_worker = True
         self.worker_thread.join()

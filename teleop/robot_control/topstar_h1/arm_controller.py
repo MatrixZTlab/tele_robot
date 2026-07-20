@@ -36,6 +36,7 @@ class H1ArmController(BaseArmController):
         self.head_pitch_ik_limit = (-0.4363323, 0.6457718)
         self.head_dq_limit = 15.0
         self.head_smooth_alpha = 0.8
+        self.home_head_q = np.array([0.0, np.deg2rad(-19.0)], dtype=float)
 
         self.joint_sign_map = np.ones(14, dtype=float)
         if not self.simulation_mode:
@@ -223,31 +224,54 @@ class H1ArmController(BaseArmController):
             })
         self.publish_event.set()
 
-    def move_joints_timed(self, joints, duration):
+    def move_joints_timed(self, joints, duration, head_q=None):
         """MoveJ：通过 /api/arm/request 下发，期间抑制 LowCmd。"""
         self._arm_active = True
         values = [float(v) for v in joints]
         if len(values) == 18:
             request_joints = values
+            arm_hw = np.array(
+                [request_joints[s] for s in self.left_slots]
+                + [request_joints[s] for s in self.right_slots],
+                dtype=float,
+            )
+            arm_values = self._hw_to_sim_arm(arm_hw)
         elif len(values) == 14:
             request_joints = self._sim_to_hw_full_body(values, 18)
+            arm_values = np.asarray(values, dtype=float)
         else:
             raise ValueError(f"MoveJ expects 14 or 18 joints, got {len(values)}")
+
+        if head_q is None:
+            head_target = self._head_hw_to_ik(request_joints[2:4])
+        else:
+            head = np.asarray(head_q, dtype=float).reshape(-1)
+            if head.size < 2:
+                raise ValueError(f"head_q expects yaw and pitch, got {head.size} value(s)")
+            head_target = np.array([
+                float(np.clip(head[0], *self.head_yaw_limit)),
+                float(np.clip(head[1], *self.head_pitch_ik_limit)),
+            ])
+            request_joints[2:4] = self._head_ik_to_hw(head_target).tolist()
 
         self._ros_node.publish_movej_request(request_joints, duration)
         self._joint_hold_until = time.monotonic() + duration
 
         with self.publish_lock:
-            self.q_target = np.array(values, dtype=float)
+            self.q_target = arm_values.copy()
             self.tauff_target = np.zeros(14, dtype=float)
-            self.last_published_q = np.array(values, dtype=float)
+            self.last_published_q = arm_values.copy()
+            self.head_target = head_target.copy()
+            self.last_published_head_q = head_target.copy()
+            self.torso_target = np.asarray(request_joints[:2], dtype=float)
+            self.last_published_torso = self.torso_target.copy()
         self.publish_event.set()
 
     def go_home(self, timeout=10.0):
         self.move_joints_timed([
             -1.6, -1.55, 0, 0, 0, 0, 0,
             1.6, -1.571, 0, 0, 0, 0, 0
-        ], duration=3.0)
+        ], duration=3.0, head_q=self.home_head_q)
 
     def wait_for_hold_expire(self, timeout=10.0):
         deadline = time.monotonic() + timeout
@@ -411,13 +435,9 @@ class H1ArmController(BaseArmController):
                 msg.motor_cmd[0].q = float(torso_clipped[0])  # TORSO_LIFT
                 msg.motor_cmd[1].q = float(torso_clipped[1])  # TORSO_PITCH
 
-                # 填充头部 (slots 2, 3)
-                if self.control_mode.solve_head:
-                    try:
-                        msg.motor_cmd[2].q = float(head_hw[0])
-                        msg.motor_cmd[3].q = float(head_hw[1])
-                    except Exception:
-                        pass
+                # 填充头部 (slots 2, 3)。arms_only 时保持 Home 头部姿态。
+                msg.motor_cmd[2].q = float(head_hw[0])
+                msg.motor_cmd[3].q = float(head_hw[1])
 
                 # ── 调试：打印下发关节角 ────────────────────────────
                 # arm_q_debug = []

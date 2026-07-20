@@ -48,16 +48,55 @@ def robust_affine_clock(source: np.ndarray, host_ns: np.ndarray) -> tuple[float,
     return float(scale), float(offset), float(np.percentile(residual_ms, 95))
 
 
+def deduplicate_camera_events(events: list[dict[str, Any]]) -> dict[str, int]:
+    """Remove repeated camera frames before fitting and timestamp matching."""
+    input_events = len(events)
+    deduplicated = []
+    seen_sequences = set()
+    seen_device_timestamps = set()
+    duplicate_sequences = 0
+    duplicate_device_timestamps = 0
+
+    for event in events:
+        sequence = event.get("sequence")
+        device_timestamp = event.get("device_timestamp_raw")
+        if sequence is not None and sequence in seen_sequences:
+            duplicate_sequences += 1
+            continue
+        if device_timestamp is not None and device_timestamp in seen_device_timestamps:
+            duplicate_device_timestamps += 1
+            continue
+        if sequence is not None:
+            seen_sequences.add(sequence)
+        if device_timestamp is not None:
+            seen_device_timestamps.add(device_timestamp)
+        deduplicated.append(event)
+
+    events[:] = deduplicated
+    return {
+        "input_events": input_events,
+        "deduplicated_events": len(deduplicated),
+        "dropped_duplicate_sequences": duplicate_sequences,
+        "dropped_duplicate_device_timestamps": duplicate_device_timestamps,
+    }
+
+
 def assign_camera_timestamps(events: list[dict[str, Any]], latency_ms: float) -> dict[str, Any]:
+    deduplication = deduplicate_camera_events(events)
     usable = [
         event for event in events
         if event.get("device_timestamp_raw") is not None
         and event.get("capture_host_receive_wall_ns") is not None
     ]
-    model = {"kind": "host_receive", "latency_ms": float(latency_ms)}
+    model = {
+        "kind": "host_receive",
+        "latency_ms": float(latency_ms),
+        **deduplication,
+    }
     if len(usable) >= 10:
         source = np.asarray([event["device_timestamp_raw"] for event in usable], dtype=np.float64)
         host = np.asarray([event["capture_host_receive_wall_ns"] for event in usable], dtype=np.float64)
+        model["source_timestamp_backwards"] = int(np.sum(np.diff(source) < 0))
         if np.all(np.diff(source) > 0):
             scale, offset, residual_p95_ms = robust_affine_clock(source, host)
             model.update({
@@ -231,6 +270,12 @@ def percentile_summary(values: list[float]) -> dict[str, float | None]:
     }
 
 
+def remove_unreferenced_files(directory: Path, referenced: set[str]) -> None:
+    for path in directory.iterdir():
+        if path.is_file() and str(path.relative_to(directory.parent)) not in referenced:
+            path.unlink()
+
+
 def sequence_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
     sequences = [int(event["sequence"]) for event in events if event.get("sequence") is not None]
     missing = 0
@@ -276,9 +321,11 @@ def align_episode(args: argparse.Namespace) -> Path:
     camera_latency = parse_latency(args.camera_latency_ms)
     cameras = {}
     camera_models = {}
+    camera_sequence_quality = {}
     for path in camera_files:
         name = path.stem.removeprefix("camera_")
         cameras[name] = load_jsonl(path)
+        camera_sequence_quality[name] = sequence_summary(cameras[name])
         camera_models[name] = assign_camera_timestamps(
             cameras[name], camera_latency.get(name, 0.0)
         )
@@ -507,6 +554,23 @@ def align_episode(args: argparse.Namespace) -> Path:
     if not frames:
         raise RuntimeError("No valid aligned frames were produced; inspect thresholds and raw streams")
 
+    remove_unreferenced_files(
+        colors_dir,
+        {
+            image_path
+            for frame in frames
+            for image_path in frame["colors"].values()
+        },
+    )
+    remove_unreferenced_files(
+        depths_dir,
+        {
+            depth_path
+            for frame in frames
+            for depth_path in frame["depths"].values()
+        },
+    )
+
     episode = {
         "info": {
             "version": "2.0.0",
@@ -530,7 +594,10 @@ def align_episode(args: argparse.Namespace) -> Path:
     valid_frame_count = sum(frame["alignment"]["valid"] for frame in frames)
     valid_ratio = valid_frame_count / len(selected_reference) if selected_reference else 0.0
     sequence_quality = {
-        **{f"camera.{name}": sequence_summary(events) for name, events in cameras.items()},
+        **{
+            f"camera.{name}": camera_sequence_quality[name]
+            for name in cameras
+        },
         "pico": sequence_summary(pico),
         "lowstate": sequence_summary(lowstate),
         "lowcmd": sequence_summary(lowcmd),

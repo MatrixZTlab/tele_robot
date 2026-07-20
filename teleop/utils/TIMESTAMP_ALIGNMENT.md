@@ -99,6 +99,11 @@ contain device timestamps and sequence numbers.
 
 ## 4. Align one episode
 
+The aligner removes repeated camera sequence/device timestamp entries before
+fitting each camera clock. The original duplicate and missing sequence counts
+remain in `alignment_report.json`; only fitting and nearest-frame matching use
+the deduplicated stream.
+
 ```bash
 cd /home/ai/lium/tele_robot
 PYTHONPATH=. python teleop/utils/align_raw_session.py \
@@ -121,6 +126,28 @@ timestamps, use strict mode for production data:
 Without strict mode the aligner records `source_clock_issues` and falls back to
 host receipt time. That fallback is useful for diagnostics, but should not be
 presented as hardware-level synchronization.
+
+For the current TOPSTAR H1 pipeline, `/lowstate` has no publisher-side wall
+timestamp and Pico browser events have normal scheduling jitter. Keep the
+strict report for diagnosis, then generate a practical slow-manipulation
+alignment with explicit interpolation limits:
+
+```bash
+PYTHONPATH=. python teleop/utils/align_raw_session.py \
+  --input-episode teleop/utils/data/topstar_h1_sync_001/raw/episode_0001 \
+  --reference-camera head_camera \
+  --fps 20 \
+  --max-camera-error-ms 20 \
+  --max-state-gap-ms 60 \
+  --max-pico-gap-ms 50 \
+  --max-action-age-ms 100 \
+  --overwrite
+```
+
+These values do not change the raw data or robot control. They only decide
+whether interpolation around a 20 Hz output timestamp is accepted. Do not use
+the practical profile for fast contact/collision tasks without adding a
+publisher-side LowState timestamp.
 
 Optional measured camera latency can be subtracted before matching:
 

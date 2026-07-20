@@ -52,6 +52,19 @@ def test_raw_writer_marks_episode_incomplete_when_background_write_fails(tmp_pat
     assert manifest["errors"][0]["error_type"] == "OSError"
 
 
+def test_raw_writer_discards_active_episode(tmp_path):
+    writer = RawSessionWriter(tmp_path / "task", queue_size=8)
+    session = writer.start_episode(3)
+    assert writer.append_event("lowstate", {"sequence": 1})
+
+    discarded = writer.discard_episode(3)
+
+    assert discarded == session
+    assert not session.exists()
+    assert writer.active is False
+    writer.close()
+
+
 def _write_jsonl(path: Path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -91,12 +104,15 @@ def test_offline_aligner_matches_cameras_and_interpolates_state(tmp_path):
             assert ok
             image_path = camera_dir / f"{sequence:09d}.jpg"
             image_path.write_bytes(encoded.tobytes())
-            rows.append({
+            row = {
                 "sequence": sequence,
                 "device_timestamp_raw": t_ns / 1e6,
                 "capture_host_receive_wall_ns": base + t_ns + 2_000_000,
                 "image_path": str(image_path.relative_to(raw)),
-            })
+            }
+            rows.append(row)
+            if sequence in (8, 16):
+                rows.append(dict(row))
         _write_jsonl(streams / f"camera_{camera_name}.jsonl", rows)
 
     state_rows = []
@@ -165,8 +181,20 @@ def test_offline_aligner_matches_cameras_and_interpolates_state(tmp_path):
     assert len(frame["actions"]["right_arm"]["qpos"]) == 7
     report = json.loads((output / "alignment_report.json").read_text())
     assert report["camera_clock_models"]["head_camera"]["kind"] == "affine_device_to_capture_host"
+    assert report["camera_clock_models"]["head_camera"]["dropped_duplicate_sequences"] == 2
+    assert report["sequence_quality"]["camera.head_camera"]["duplicates"] == 2
     assert report["valid_frames"] == len(episode["data"])
     assert report["raw_queue_dropped"] == {}
+    referenced_images = {
+        image_path
+        for item in episode["data"]
+        for image_path in item["colors"].values()
+    }
+    written_images = {
+        str(path.relative_to(output))
+        for path in (output / "colors").iterdir()
+    }
+    assert written_images == referenced_images
 
 
 def test_actuation_delay_estimator_recovers_known_lag(tmp_path):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import threading
 import time
 from collections import Counter
@@ -152,6 +153,39 @@ class RawSessionWriter:
             )
             raise RuntimeError(f"Raw episode contains write failures: {summary}")
         return session_dir
+
+    def discard_episode(
+        self,
+        episode_index: int | None = None,
+        timeout: float = 30.0,
+    ) -> Path | None:
+        """Flush and permanently remove an active or completed raw episode."""
+        with self._lock:
+            active_index = self._episode_index
+
+        if active_index is not None:
+            if episode_index is not None and int(episode_index) != active_index:
+                raise ValueError(
+                    f"Active raw episode is {active_index}, not {episode_index}"
+                )
+            session_dir = self.raw_root / f"episode_{active_index:04d}"
+            try:
+                self.stop_episode(timeout=timeout)
+            except (TimeoutError, queue.Full):
+                raise
+            except Exception:
+                # The barrier has already closed stream handles before stop_episode
+                # reports writer errors, so a rejected capture can still be removed.
+                pass
+        elif episode_index is not None:
+            session_dir = self.raw_root / f"episode_{int(episode_index):04d}"
+        else:
+            return None
+
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+            return session_dir
+        return None
 
     def close(self, timeout: float = 30.0) -> None:
         if self._closed:

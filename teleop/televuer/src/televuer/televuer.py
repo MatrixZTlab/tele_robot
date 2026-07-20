@@ -11,6 +11,7 @@ import threading
 import time
 import cv2
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -298,8 +299,32 @@ class TeleVuer:
                 return float(raw), key
         return None, None
 
-    def _enqueue_xr_event(self, kind, value, monotonic_ns, wall_ns, sequence):
-        source_timestamp_raw, source_timestamp_key = self._source_timestamp_from_event(value)
+    @classmethod
+    def _source_timestamp_from_client_event(cls, event):
+        source_timestamp_raw, source_timestamp_key = cls._source_timestamp_from_event(
+            getattr(event, "value", None)
+        )
+        if source_timestamp_raw is not None:
+            return source_timestamp_raw, source_timestamp_key
+
+        # Vuer sends Date.now() as the top-level event `ts`. ClientEvent turns
+        # that value into datetime before invoking this handler.
+        event_ts = getattr(event, "ts", None)
+        if isinstance(event_ts, datetime):
+            return event_ts.timestamp() * 1000.0, "event.ts"
+        if isinstance(event_ts, (int, float)):
+            event_ts = float(event_ts)
+            # Vuer's generated default timestamp is seconds; browser Date.now()
+            # is milliseconds. Normalize either representation to milliseconds.
+            if abs(event_ts) < 100_000_000_000:
+                event_ts *= 1000.0
+            return event_ts, "event.ts"
+        return None, None
+
+    def _enqueue_xr_event(self, kind, value, monotonic_ns, wall_ns, sequence,
+                          source_timestamp_raw=None, source_timestamp_key=None):
+        if source_timestamp_raw is None:
+            source_timestamp_raw, source_timestamp_key = self._source_timestamp_from_event(value)
         left_pose = value.get("left") if isinstance(value, dict) else None
         right_pose = value.get("right") if isinstance(value, dict) else None
         if kind == "hand":
@@ -331,20 +356,30 @@ class TeleVuer:
             with self.xr_event_drop_count_shared.get_lock():
                 self.xr_event_drop_count_shared.value += 1
 
-    def _mark_xr_pose_received(self, kind, value):
+    def _mark_xr_pose_received(self, kind, value, source_timestamp_raw=None,
+                               source_timestamp_key=None):
         monotonic_ns = time.monotonic_ns()
         wall_ns = time.time_ns()
         with self.controller_pose_sequence_shared.get_lock():
             self.controller_pose_sequence_shared.value += 1
             sequence = self.controller_pose_sequence_shared.value
-        source_timestamp_raw, _ = self._source_timestamp_from_event(value)
+        if source_timestamp_raw is None:
+            source_timestamp_raw, source_timestamp_key = self._source_timestamp_from_event(value)
         with self.controller_pose_timestamp_ns_shared.get_lock():
             self.controller_pose_timestamp_ns_shared.value = monotonic_ns
         with self.controller_pose_wall_ns_shared.get_lock():
             self.controller_pose_wall_ns_shared.value = wall_ns
         with self.controller_source_timestamp_raw_shared.get_lock():
             self.controller_source_timestamp_raw_shared.value = source_timestamp_raw or 0.0
-        self._enqueue_xr_event(kind, value, monotonic_ns, wall_ns, sequence)
+        self._enqueue_xr_event(
+            kind,
+            value,
+            monotonic_ns,
+            wall_ns,
+            sequence,
+            source_timestamp_raw=source_timestamp_raw,
+            source_timestamp_key=source_timestamp_key,
+        )
 
     async def on_controller_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html"""
@@ -382,7 +417,13 @@ class TeleVuer:
 
             extract_controllers(left_controller, "left")
             extract_controllers(right_controller, "right")
-            self._mark_xr_pose_received("controller", event.value)
+            source_timestamp_raw, source_timestamp_key = self._source_timestamp_from_client_event(event)
+            self._mark_xr_pose_received(
+                "controller",
+                event.value,
+                source_timestamp_raw=source_timestamp_raw,
+                source_timestamp_key=source_timestamp_key,
+            )
         except:
             pass
 
@@ -429,7 +470,13 @@ class TeleVuer:
             extract_hand_poses(right_hand_data, self.right_arm_pose_shared, self.right_hand_position_shared, self.right_hand_orientation_shared)
             extract_hands(left_hand, "left")
             extract_hands(right_hand, "right")
-            self._mark_xr_pose_received("hand", event.value)
+            source_timestamp_raw, source_timestamp_key = self._source_timestamp_from_client_event(event)
+            self._mark_xr_pose_received(
+                "hand",
+                event.value,
+                source_timestamp_raw=source_timestamp_raw,
+                source_timestamp_key=source_timestamp_key,
+            )
 
         except:
             pass

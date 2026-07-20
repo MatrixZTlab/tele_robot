@@ -6,7 +6,11 @@ from multiprocessing import Value, Array, Lock
 import threading
 import numpy as np
 import logging_mp
-logging_mp.basicConfig(level=logging_mp.INFO)
+try:
+    logging_mp.basicConfig(level=logging_mp.INFO)
+except RuntimeError:
+    # Another imported module may have already initialized logging_mp.
+    pass
 logger_mp = logging_mp.getLogger(__name__)
 
 import os 
@@ -89,6 +93,8 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter TELEOP_ACTIVE state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
+RECORD_DISCARD = False  # Discard current/latest recording
+LAST_RECORD_EPISODE_ID = None  # Latest episode created during this process
 SERVO_TOGGLE = False  # Toggle ServoJ recording (press 'v' to toggle)
 
 # Teleop mode: "relative_head" (existing) | "relative_pose" (new)
@@ -139,12 +145,16 @@ _prev_right_a_relative = False
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, TELEOP_ACTIVE, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE, RECORD_TOGGLE
+    global STOP, TELEOP_ACTIVE, TELEOP_MODE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE
+    global RECORD_TOGGLE, RECORD_DISCARD
     global _base_tgt_vx, _base_tgt_vy, _base_tgt_wz, KEY_W, KEY_A, KEY_S, KEY_D, KEY_Q, KEY_E
     # Unitree recording semantics take precedence over the optional keyboard
     # chassis binding: while teleop is active, s toggles one dataset episode.
     if key == 's' and TELEOP_ACTIVE and args.record:
         RECORD_TOGGLE = True
+        return
+    if key == 'x' and args.record:
+        RECORD_DISCARD = True
         return
     # ── 键盘底盘控制（按住时持续移动）──
     # 注意: 'q' 兼顾左转+退出；优先退出（未激活遥操时），激活时左转
@@ -358,6 +368,118 @@ def get_state() -> dict:
         "LEFT_ARM_ACTIVE": LEFT_ARM_ACTIVE,
         "RIGHT_ARM_ACTIVE": RIGHT_ARM_ACTIVE,
     }
+
+
+def _process_record_requests():
+    """Apply start/save/discard requests from keyboard or XR buttons."""
+    global READY, RECORD_RUNNING, RECORD_TOGGLE, RECORD_DISCARD
+    global LAST_RECORD_EPISODE_ID
+
+    if not args.record:
+        return
+
+    writer = globals().get("episode_writer")
+    raw = globals().get("raw_writer")
+    if writer is None:
+        logger_mp.error("Recording request ignored: episode writer is unavailable")
+        RECORD_TOGGLE = False
+        RECORD_DISCARD = False
+        return
+
+    if RECORD_DISCARD:
+        RECORD_DISCARD = False
+        RECORD_TOGGLE = False
+        episode_id = LAST_RECORD_EPISODE_ID
+        if episode_id is None:
+            logger_mp.warning(
+                "XR Right B: no episode recorded during this run is available "
+                "to discard"
+            )
+        else:
+            was_recording = RECORD_RUNNING
+            RECORD_RUNNING = False
+            raw_dir = None
+            raw_error = None
+            if raw is not None:
+                try:
+                    raw_dir = raw.discard_episode(episode_id)
+                except Exception as exc:
+                    raw_error = exc
+                    logger_mp.exception(
+                        "Failed to discard raw episode_%04d", episode_id
+                    )
+
+            if raw_error is not None:
+                # Preserve the online copy when raw deletion fails so the two
+                # representations cannot silently diverge.
+                if was_recording:
+                    writer.save_episode()
+                LAST_RECORD_EPISODE_ID = None
+                logger_mp.error(
+                    "XR Right B: discard aborted for episode_%04d; online data "
+                    "was retained because raw cleanup failed: %s",
+                    episode_id,
+                    raw_error,
+                )
+            else:
+                try:
+                    episode_dir = writer.discard_episode(episode_id)
+                except Exception:
+                    episode_dir = None
+                    logger_mp.exception(
+                        "Failed to discard online episode_%04d", episode_id
+                    )
+                LAST_RECORD_EPISODE_ID = None
+                if episode_dir is None and raw_dir is None:
+                    logger_mp.warning(
+                        "XR Right B: episode_%04d was already absent", episode_id
+                    )
+                else:
+                    logger_mp.warning(
+                        "XR Right B: DISCARDING episode_%04d "
+                        "(online=%s, raw=%s)",
+                        episode_id,
+                        episode_dir,
+                        raw_dir,
+                    )
+        READY = writer.is_ready()
+        return
+
+    if RECORD_TOGGLE:
+        RECORD_TOGGLE = False
+        if not RECORD_RUNNING:
+            if writer.create_episode():
+                LAST_RECORD_EPISODE_ID = writer.episode_id
+                if raw is not None:
+                    raw.start_episode(
+                        writer.episode_id,
+                        metadata={
+                            'task_name': args.task_name,
+                            'task_goal': args.task_goal,
+                            'frequency_hz': args.frequency,
+                            'robot': args.robot,
+                            'control_mode': args.control_mode,
+                            'input_mode': args.input_mode,
+                            'image_server_ip': args.img_server_ip,
+                            'camera_config': camera_config,
+                        },
+                    )
+                RECORD_RUNNING = True
+                READY = False
+                logger_mp.info("XR Left Y: dataset recording STARTED")
+            else:
+                logger_mp.error("Failed to create episode; recording not started")
+        else:
+            RECORD_RUNNING = False
+            if raw is not None:
+                raw_dir = raw.stop_episode()
+                logger_mp.info("Raw streams flushed: %s", raw_dir)
+            writer.save_episode()
+            logger_mp.info(
+                "XR Left Y: dataset recording STOPPED; episode is being saved"
+            )
+
+    READY = writer.is_ready()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -831,7 +953,10 @@ if __name__ == '__main__':
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
         if args.record:
-            logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
+            logger_mp.info("🟡  Left Y / [s]: START or SAVE recording.")
+            logger_mp.info(
+                "🗑️  Right B / [x]: DISCARD current/latest recording from this run."
+            )
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
@@ -923,7 +1048,7 @@ if __name__ == '__main__':
                             robot.reset_relative_pose_state('left')
                             logger_mp.info("XR Right A: Right hand → Left arm activated")
 
-                    # Left B/Y mirrors the official s-key dataset toggle.
+                    # Pico left Y mirrors the official s-key dataset toggle.
                     if args.record and hasattr(tele_data, 'left_ctrl_bButton') and tele_data.left_ctrl_bButton:
                         if not getattr(tv_wrapper, '_prev_left_ctrl_bButton', False):
                             if TELEOP_ACTIVE:
@@ -934,20 +1059,15 @@ if __name__ == '__main__':
                     else:
                         tv_wrapper._prev_left_ctrl_bButton = False
 
-                    # Right B/Y: 记录单个 MoveJ 点
+                    # Pico right B discards the current or latest dataset episode.
                     if args.record and hasattr(tele_data, 'right_ctrl_bButton') and tele_data.right_ctrl_bButton:
                         if not getattr(tv_wrapper, '_prev_right_ctrl_bButton', False):
-                            try:
-                                recorder_manager.record_movej_point()
-                                _pt_count = getattr(recorder_manager.recorder, 'total_points', 0)
-                                _q = arm_ctrl.get_current_dual_arm_q()
-                                _q_summary = '[' + ', '.join(f'{v:+.2f}' for v in _q[:3]) + ' ...]'
-                                logger_mp.info(f"🎯 XR Right B/Y: MoveJ point #{_pt_count} recorded  |  joints[0:3]={_q_summary}")
-                            except Exception:
-                                logger_mp.exception('Failed to record MoveJ point via XR')
+                            RECORD_DISCARD = True
                         tv_wrapper._prev_right_ctrl_bButton = True
                     else:
                         tv_wrapper._prev_right_ctrl_bButton = False
+
+                    _process_record_requests()
 
                     # ── 等待循环中响应 trigger/squeeze ──
                     if hasattr(robot, 'handler_registry') and robot.handler_registry.count > 0:
@@ -984,42 +1104,6 @@ if __name__ == '__main__':
                         left_wrist_img = img_client.get_left_wrist_frame()
                     if camera_config.get('right_wrist_camera', {}).get('enable_zmq', False):
                         right_wrist_img = img_client.get_right_wrist_frame()
-
-                # record mode
-                if args.record and RECORD_TOGGLE:
-                    RECORD_TOGGLE = False
-                    if not RECORD_RUNNING:
-                        if episode_writer.create_episode():
-                            if raw_writer is not None:
-                                raw_writer.start_episode(
-                                    episode_writer.episode_id,
-                                    metadata={
-                                        'task_name': args.task_name,
-                                        'task_goal': args.task_goal,
-                                        'frequency_hz': args.frequency,
-                                        'robot': args.robot,
-                                        'control_mode': args.control_mode,
-                                        'input_mode': args.input_mode,
-                                        'image_server_ip': args.img_server_ip,
-                                        'camera_config': camera_config,
-                                    },
-                                )
-                            RECORD_RUNNING = True
-                            READY = False
-                            logger_mp.info("Dataset recording STARTED")
-                        else:
-                            logger_mp.error("Failed to create episode; recording not started")
-                    else:
-                        RECORD_RUNNING = False
-                        if raw_writer is not None:
-                            raw_dir = raw_writer.stop_episode()
-                            logger_mp.info("Raw streams flushed: %s", raw_dir)
-                        episode_writer.save_episode()
-                        logger_mp.info("Dataset recording STOPPED; episode is being saved")
-                        if args.sim:
-                            pass  # sim reset TODO
-                if args.record:
-                    READY = episode_writer.is_ready()
 
                 # servo toggle (press 'v' to toggle ServoJ recording when recording)
                 if args.record and SERVO_TOGGLE:
@@ -1137,7 +1221,7 @@ if __name__ == '__main__':
                 # ── Pass teleop_mode to tele_data for RobotDriver ──
                 tele_data.teleop_mode = TELEOP_MODE
 
-                # Left B/Y is an XR alias for the official s-key dataset toggle.
+                # Pico left Y starts or saves one dataset episode.
                 if args.record and hasattr(tele_data, 'left_ctrl_bButton') and tele_data.left_ctrl_bButton:
                     if not getattr(tv_wrapper, '_prev_left_ctrl_bButton', False):
                         RECORD_TOGGLE = True
@@ -1145,20 +1229,15 @@ if __name__ == '__main__':
                 else:
                     tv_wrapper._prev_left_ctrl_bButton = False
 
-                # Right B/Y: 记录单个 MoveJ 点
+                # Pico right B discards the current or latest dataset episode.
                 if args.record and hasattr(tele_data, 'right_ctrl_bButton') and tele_data.right_ctrl_bButton:
                     if not getattr(tv_wrapper, '_prev_right_ctrl_bButton', False):
-                        try:
-                            recorder_manager.record_movej_point()
-                            _pt_count = getattr(recorder_manager.recorder, 'total_points', 0)
-                            _q = arm_ctrl.get_current_dual_arm_q()
-                            _q_summary = '[' + ', '.join(f'{v:+.2f}' for v in _q[:3]) + ' ...]'
-                            logger_mp.info(f"🎯 XR Right B/Y: MoveJ point #{_pt_count} recorded  |  joints[0:3]={_q_summary}")
-                        except Exception:
-                            logger_mp.exception('Failed to record MoveJ point via XR')
+                        RECORD_DISCARD = True
                     tv_wrapper._prev_right_ctrl_bButton = True
                 else:
                     tv_wrapper._prev_right_ctrl_bButton = False
+
+                _process_record_requests()
 
                 # ── 底盘 & Torso 控制（独立于 TELEOP_ACTIVE，依赖 --motion）──
                 _publish_base_cmd(tele_data)
