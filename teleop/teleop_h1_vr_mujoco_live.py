@@ -11,7 +11,9 @@ import argparse
 import logging
 import math
 import signal
+import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -47,6 +49,7 @@ DEFAULT_DRY_RUN_INITIAL_Q = [
     0.34901664,
     -0.05125465,
 ]
+H1_STATE_LIMIT_TOLERANCE_RAD = 0.03
 
 
 class LiveSafetyError(RuntimeError):
@@ -161,6 +164,119 @@ def _as_arm_q(value: Sequence[float], name: str) -> np.ndarray:
     return result.copy()
 
 
+def monotonic_timestamp_is_fresh(
+    timestamp_ns: int,
+    timeout_s: float,
+    *,
+    now_ns: int | None = None,
+) -> bool:
+    """Check an input timestamp from the local monotonic clock domain."""
+    if not math.isfinite(timeout_s) or timeout_s <= 0.0:
+        raise ValueError("timeout_s must be finite and greater than zero")
+    try:
+        source_ns = int(timestamp_ns)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if source_ns <= 0:
+        return False
+    current_ns = time.monotonic_ns() if now_ns is None else int(now_ns)
+    age_s = (current_ns - source_ns) / 1_000_000_000.0
+    # A tiny negative age can occur when the producer samples just after the
+    # caller. Larger future values indicate a clock-domain or data error.
+    return -0.01 <= age_s <= timeout_s
+
+
+def mapped_wrist_poses(
+    tele_data: Any, controller_mapping: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return controller poses ordered as robot-left, robot-right."""
+    if controller_mapping == "same-side":
+        return tele_data.left_wrist_pose, tele_data.right_wrist_pose
+    if controller_mapping == "mirrored":
+        return tele_data.right_wrist_pose, tele_data.left_wrist_pose
+    raise ValueError(f"unknown controller mapping: {controller_mapping!r}")
+
+
+def _read_robot_arm_state(
+    controller: Any,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Read q, dq, and receipt time from one atomic LowState snapshot."""
+    q, dq, receive_ns = controller.get_current_dual_arm_state()
+    return (
+        _as_arm_q(q, "measured arm q"),
+        _as_arm_q(dq, "measured arm dq"),
+        int(receive_ns),
+    )
+
+
+def _validate_robot_arm_state(
+    solver: H1MuJoCoLMIK,
+    q: Sequence[float],
+    dq: Sequence[float],
+    *,
+    limit_tolerance_rad: float = H1_STATE_LIMIT_TOLERANCE_RAD,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reject malformed measurements and states outside the H1 envelope."""
+    measured_q = _as_arm_q(q, "measured arm q")
+    measured_dq = _as_arm_q(dq, "measured arm dq")
+    lower, upper = solver.arm_joint_limits
+    within_limits = solver.arm_q_within_limits(
+        measured_q, tolerance=limit_tolerance_rad
+    )
+    if within_limits:
+        return measured_q, measured_dq
+
+    distance = np.maximum(lower - measured_q, measured_q - upper)
+    joint_index = int(np.argmax(distance))
+    raise LiveSafetyError(
+        f"measured arm q[{joint_index}]={measured_q[joint_index]:.4f} rad "
+        f"is outside allowed [{lower[joint_index]:.4f}, "
+        f"{upper[joint_index]:.4f}] rad envelope"
+    )
+
+
+def _send_robot_hold(
+    controller: Any,
+    solver: H1MuJoCoLMIK,
+    measured_q: Sequence[float],
+) -> np.ndarray:
+    """Hold a validated measured pose with the proven gravity feed-forward."""
+    command_q = _as_arm_q(measured_q, "hold arm q")
+    tauff = _as_arm_q(
+        solver.gravity_compensation(command_q),
+        "gravity compensation",
+    )
+    controller.servo_dual_arm(command_q, tauff)
+    return tauff
+
+
+def _validate_ros_command_graph(
+    controller: Any, *, settle_timeout_s: float = 2.0
+) -> tuple[int, int]:
+    """Require one local LowCmd publisher and at least one robot subscriber."""
+    if not math.isfinite(settle_timeout_s) or settle_timeout_s < 0.0:
+        raise ValueError("settle_timeout_s must be finite and non-negative")
+    node = controller._ros_node
+    deadline = time.monotonic() + settle_timeout_s
+    publishers = subscribers = 0
+    while True:
+        publishers = int(node.count_publishers("/lowcmd"))
+        subscribers = int(node.count_subscribers("/lowcmd"))
+        if publishers == 1 and subscribers >= 1:
+            return publishers, subscribers
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if publishers != 1:
+        raise LiveSafetyError(
+            f"expected exactly one /lowcmd publisher (this process), found "
+            f"{publishers}; stop every other arm controller"
+        )
+    raise LiveSafetyError(
+        "no /lowcmd subscriber discovered; robot command endpoint is unavailable"
+    )
+
+
 def limit_joint_speed(
     previous_q: Sequence[float],
     target_q: Sequence[float],
@@ -195,12 +311,13 @@ class H1MuJoCoLiveCore:
         max_iters: int = 60,
         tolerance: float = 1e-4,
         damping: float = 1e-3,
-        current_q_weight: float = 0.01,
+        current_q_weight: float = 0.0001,
         home_qpos: Sequence[float] | None = None,
         home_weight: float = 0.0,
         max_ik_position_error_m: float = 0.06,
         max_ik_rotation_error_rad: float = math.radians(5.0),
         hold_on_ik_safety: bool = False,
+        mirror_lateral_translation: bool = False,
     ) -> None:
         if not math.isfinite(max_solver_jump_rad) or max_solver_jump_rad <= 0.0:
             raise ValueError("max_solver_jump_rad must be finite and greater than zero")
@@ -247,6 +364,7 @@ class H1MuJoCoLiveCore:
         self.max_ik_position_error_m = max_ik_position_error_m
         self.max_ik_rotation_error_rad = max_ik_rotation_error_rad
         self.hold_on_ik_safety = bool(hold_on_ik_safety)
+        self.mirror_lateral_translation = bool(mirror_lateral_translation)
         self.left_tracker: VRRelativePoseTracker | None = None
         self.right_tracker: VRRelativePoseTracker | None = None
         self.previous_command_q: np.ndarray | None = None
@@ -266,6 +384,11 @@ class H1MuJoCoLiveCore:
             ema_alpha=self.ema_alpha,
             position_deadband=self.position_deadband_m,
             rotation_deadband_deg=self.rotation_deadband_deg,
+            translation_axis_sign=(
+                (1.0, -1.0, 1.0)
+                if self.mirror_lateral_translation
+                else (1.0, 1.0, 1.0)
+            ),
         )
         self.left_tracker = VRRelativePoseTracker(
             left_ee, H1_XR_TO_ROBOT_ROTATION, **tracker_kwargs
@@ -285,6 +408,7 @@ class H1MuJoCoLiveCore:
         self.right_tracker = None
         self.previous_command_q = None
         self.previous_raw_ik_q = None
+
     def _hold_previous_command(self, result: LMIKResult) -> LiveStepResult:
         if self.previous_command_q is None or self.previous_raw_ik_q is None:
             raise LiveSafetyError("teleoperation state is incomplete")
@@ -351,6 +475,8 @@ class H1MuJoCoLiveCore:
             accepted_approximately = True
 
         raw_ik_q = _as_arm_q(result.arm_q, "IK result")
+        if not self.solver.arm_q_within_limits(raw_ik_q, tolerance=1e-9):
+            raise LiveSafetyError("MuJoCo IK returned a joint-limit violation")
         # Compare consecutive IK solutions, not the speed-limited command. A
         # user can legitimately move faster than the configured robot speed,
         # in which case the command lags the target by design.
@@ -369,6 +495,13 @@ class H1MuJoCoLiveCore:
             self.max_joint_speed_rad_s,
             dt,
         )
+        command_within_limits = self.solver.arm_q_within_limits(
+            command_q, tolerance=H1_STATE_LIMIT_TOLERANCE_RAD
+        )
+        if not command_within_limits:
+            raise LiveSafetyError(
+                "speed-limited command is outside the H1 joint envelope"
+            )
         self.previous_command_q = command_q.copy()
         self.previous_raw_ik_q = raw_ik_q.copy()
         return LiveStepResult(
@@ -377,7 +510,14 @@ class H1MuJoCoLiveCore:
 
 
 class FormalRecordingSession:
-    """Keep LeRobot video data and legacy JSON on the same control frames."""
+    """Record incremental teleop frames using the old complete data path.
+
+    The LeRobot writer remains available for the newer dataset format.  When
+    supplied, ``legacy_episode_writer`` and ``raw_writer`` mirror the
+    ``teleop_hand_and_arm.py`` recording lifecycle: ``episode_XXXX`` contains
+    images/state/action JSON, while ``raw/episode_XXXX`` contains asynchronous
+    camera, Pico and controller streams.
+    """
 
     def __init__(
         self,
@@ -393,6 +533,9 @@ class FormalRecordingSession:
         frequency: float,
         sync_tolerance_s: float,
         camera_sync_tolerance_s: float,
+        legacy_episode_writer: Any | None = None,
+        raw_writer: Any | None = None,
+        max_camera_age_s: float = 0.10,
     ) -> None:
         self.image_client = image_client
         self.camera_config = camera_config
@@ -405,11 +548,28 @@ class FormalRecordingSession:
         self.frequency = frequency
         self.sync_tolerance_s = sync_tolerance_s
         self.camera_sync_tolerance_s = camera_sync_tolerance_s
+        self.legacy_episode_writer = legacy_episode_writer
+        self.raw_writer = raw_writer
+        self.max_camera_age_s = float(max_camera_age_s)
         self.active = False
         self.episode_index = 0
+        self.last_saved_episode_index: int | None = None
         self.frame_index = 0
         self.legacy_recorder: Any = None
         self._prefetched_images: dict[str, Any] | None = None
+        self._raw_listeners: list[tuple[str, Any]] = []
+        if self.raw_writer is not None and hasattr(
+            self.image_client, "add_packet_listener"
+        ):
+            for camera_name in (
+                "head_camera", "left_wrist_camera", "right_wrist_camera"
+            ):
+                listener = self.raw_writer.append_camera_packet
+                try:
+                    self.image_client.add_packet_listener(camera_name, listener)
+                    self._raw_listeners.append((camera_name, listener))
+                except Exception:
+                    LOG.exception("failed to attach raw listener: %s", camera_name)
 
     def _read_images(self) -> dict[str, Any]:
         return {
@@ -455,7 +615,29 @@ class FormalRecordingSession:
         try:
             if not self.episode_writer.create_episode():
                 raise RuntimeError("LeRobot episode is already active")
+            if self.legacy_episode_writer is not None:
+                if not self.legacy_episode_writer.create_episode():
+                    raise RuntimeError("legacy episode writer is busy")
+                self.episode_index = int(
+                    getattr(self.legacy_episode_writer, "episode_id", self.episode_index)
+                )
+            if self.raw_writer is not None:
+                self.raw_writer.start_episode(
+                    self.episode_index,
+                    metadata={
+                        "task_name": self.task_name,
+                        "task_description": self.task_description,
+                        "frequency_hz": self.frequency,
+                        "control_mode": "incremental_mujoco_ik",
+                        "robot_model": "TOPSTAR_H1_MUJOCO_IK",
+                    },
+                )
         except Exception:
+            if self.legacy_episode_writer is not None:
+                try:
+                    self.legacy_episode_writer.discard_episode(self.episode_index)
+                except Exception:
+                    pass
             recorder.stop_servo_recording(smooth_window_size=1)
             recorder.finish()
             raise
@@ -485,6 +667,8 @@ class FormalRecordingSession:
         accepted_approximately: bool,
         control_cycle_timestamp_ns: int,
         robot_step_done_timestamp_ns: int,
+        pico_timestamp_ns: int | None = None,
+        state_receive_timestamp_ns: int | None = None,
     ) -> None:
         if not self.active or self.legacy_recorder is None:
             raise RuntimeError("recording is not active")
@@ -495,6 +679,26 @@ class FormalRecordingSession:
             camera_sync_skew_s = (
                 max(camera_timestamps) - min(camera_timestamps)
             ) / 1_000_000_000.0
+        camera_ages_s = [
+            max(
+                0.0,
+                (int(control_cycle_timestamp_ns) - int(timestamp))
+                / 1_000_000_000.0,
+            )
+            for timestamp in camera_timestamps
+        ]
+        max_camera_age_s = max(camera_ages_s) if camera_ages_s else None
+        invalid_reasons = []
+        if (
+            camera_sync_skew_s is not None
+            and camera_sync_skew_s > self.camera_sync_tolerance_s
+        ):
+            invalid_reasons.append("camera_sync_skew")
+        if (
+            max_camera_age_s is not None
+            and max_camera_age_s > self.max_camera_age_s
+        ):
+            invalid_reasons.append("camera_age")
         alignment = {
             "scheme": "lerobot_fps_grid",
             "fps": self.frequency,
@@ -511,6 +715,16 @@ class FormalRecordingSession:
                 if camera_sync_skew_s is None
                 else camera_sync_skew_s <= self.camera_sync_tolerance_s
             ),
+            "max_camera_age_s": max_camera_age_s,
+            "camera_age_within_tolerance": (
+                None
+                if max_camera_age_s is None
+                else max_camera_age_s <= self.max_camera_age_s
+            ),
+            "valid": not invalid_reasons,
+            "invalid_reasons": invalid_reasons,
+            "state_receive_timestamp_ns": state_receive_timestamp_ns,
+            "pico_timestamp_ns": pico_timestamp_ns,
             "mujoco_ik": {
                 "raw_arm_q": _as_arm_q(raw_ik_q, "raw_ik_q").tolist(),
                 "converged": bool(ik_result.converged),
@@ -530,6 +744,28 @@ class FormalRecordingSession:
             alignment=alignment,
         )
 
+        # The old EpisodeWriter expects JSON-native lists rather than numpy
+        # arrays.  Keep its exact state/action tree alongside LeRobot.
+        if self.legacy_episode_writer is not None:
+            def _json_tree(value: Any) -> Any:
+                if isinstance(value, np.ndarray):
+                    return value.tolist()
+                if isinstance(value, dict):
+                    return {key: _json_tree(item) for key, item in value.items()}
+                if isinstance(value, (list, tuple)):
+                    return [_json_tree(item) for item in value]
+                return value
+
+            legacy_alignment = dict(alignment)
+            legacy_alignment["max_camera_age_s"] = self.max_camera_age_s
+            self.legacy_episode_writer.add_item(
+                colors=camera_batch.colors,
+                depths=camera_batch.depths,
+                states=_json_tree(states),
+                actions=_json_tree(actions),
+                alignment=_json_tree(legacy_alignment),
+            )
+
         command_deg = np.rad2deg(
             _as_arm_q(command_q, "command_q")
         ).tolist()
@@ -545,10 +781,42 @@ class FormalRecordingSession:
         )
         self.frame_index += 1
 
+        if self.raw_writer is not None:
+            self.raw_writer.append_event(
+                "control",
+                {
+                    "frame_index": int(self.frame_index - 1),
+                    "control_cycle_timestamp_ns": int(control_cycle_timestamp_ns),
+                    "robot_step_done_timestamp_ns": int(robot_step_done_timestamp_ns),
+                    "pico_timestamp_ns": pico_timestamp_ns,
+                    "state_receive_timestamp_ns": state_receive_timestamp_ns,
+                    "camera_timestamps_ns": {
+                        key: int(value)
+                        for key, value in camera_batch.timestamps_ns.items()
+                    },
+                    "measured_q_rad": _as_arm_q(measured_q, "measured_q").tolist(),
+                    "command_q_rad": _as_arm_q(command_q, "command_q").tolist(),
+                    "raw_ik_q_rad": _as_arm_q(raw_ik_q, "raw_ik_q").tolist(),
+                    "ik_converged": bool(ik_result.converged),
+                    "ik_translation_error_m": float(ik_result.translation_error_norm),
+                    "ik_rotation_error_rad": float(ik_result.rotation_error_norm),
+                },
+            )
+
     def stop(self) -> None:
         if not self.active:
             return
         errors = []
+        try:
+            if self.raw_writer is not None:
+                self.raw_writer.stop_episode()
+        except Exception as exc:
+            errors.append(f"raw stream save failed: {exc}")
+        try:
+            if self.legacy_episode_writer is not None:
+                self.legacy_episode_writer.save_episode()
+        except Exception as exc:
+            errors.append(f"legacy episode save failed: {exc}")
         try:
             self.episode_writer.save_episode()
         except Exception as exc:
@@ -565,7 +833,65 @@ class FormalRecordingSession:
         self.active = False
         self.legacy_recorder = None
         self._prefetched_images = None
+        self.last_saved_episode_index = int(self.episode_index)
         self.episode_index += 1
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def discard(self) -> None:
+        """Discard the current episode using the old Right-B semantics."""
+        if not self.active:
+            return
+        episode_index = int(self.episode_index)
+        errors = []
+        if self.raw_writer is not None:
+            try:
+                self.raw_writer.discard_episode(episode_index)
+            except Exception as exc:
+                errors.append(f"raw discard failed: {exc}")
+        if self.legacy_episode_writer is not None:
+            try:
+                self.legacy_episode_writer.discard_episode(episode_index)
+            except Exception as exc:
+                errors.append(f"legacy discard failed: {exc}")
+        # No LeRobot frames are committed until its schema warmup completes;
+        # clear that in-memory episode when possible.  Previously committed
+        # LeRobot frames are intentionally left intact rather than deleting an
+        # unrelated dataset episode.
+        self.episode_writer.pending_alignment = []
+        self.episode_writer._warmup_samples = []
+        self.episode_writer.episode_active = False
+        if self.legacy_recorder is not None:
+            try:
+                if self.legacy_recorder._servo_recording:
+                    self.legacy_recorder.stop_servo_recording(smooth_window_size=1)
+                self.legacy_recorder.close()
+            except Exception as exc:
+                errors.append(f"trajectory discard failed: {exc}")
+        self.active = False
+        self.legacy_recorder = None
+        self._prefetched_images = None
+        self.episode_index += 1
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def discard_latest(self) -> None:
+        """Discard the most recently saved old-format episode, if present."""
+        episode_index = self.last_saved_episode_index
+        if episode_index is None:
+            return
+        errors = []
+        if self.raw_writer is not None:
+            try:
+                self.raw_writer.discard_episode(episode_index)
+            except Exception as exc:
+                errors.append(f"raw discard failed: {exc}")
+        if self.legacy_episode_writer is not None:
+            try:
+                self.legacy_episode_writer.discard_episode(episode_index)
+            except Exception as exc:
+                errors.append(f"legacy discard failed: {exc}")
+        self.last_saved_episode_index = None
         if errors:
             raise RuntimeError("; ".join(errors))
 
@@ -575,7 +901,13 @@ class FormalRecordingSession:
             self.stop()
         except Exception as exc:
             stop_error = exc
-        self.episode_writer.close()
+        try:
+            if self.legacy_episode_writer is not None:
+                self.legacy_episode_writer.close()
+        finally:
+            if self.raw_writer is not None:
+                self.raw_writer.close()
+            self.episode_writer.close()
         if stop_error is not None:
             raise stop_error
 
@@ -591,22 +923,49 @@ class H1MuJoCoViewer:
                 "MuJoCo viewer requires the optional GUI dependencies"
             ) from exc
         self._solver = solver
+        threads_before_launch = set(threading.enumerate())
         self._viewer = mujoco.viewer.launch_passive(
             solver._model,
             solver._data,
             show_left_ui=True,
             show_right_ui=True,
         )
+        self._viewer_threads = [
+            thread
+            for thread in threading.enumerate()
+            if thread not in threads_before_launch
+        ]
 
     def is_running(self) -> bool:
         return self._viewer.is_running()
 
     def update(self, arm_q: Sequence[float]) -> None:
-        self._solver.forward_kinematics(_as_arm_q(arm_q, "viewer arm_q"))
+        with self._viewer.lock():
+            self._solver.forward_kinematics(
+                _as_arm_q(arm_q, "viewer arm_q")
+            )
         self._viewer.sync()
+
+    def lock(self) -> Any:
+        """Lock the passive viewer while its shared MuJoCo data is changed."""
+        return self._viewer.lock()
 
     def close(self) -> None:
         self._viewer.close()
+        deadline = time.monotonic() + 2.0
+        for thread in self._viewer_threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            thread.join(remaining)
+        still_running = [
+            thread.name for thread in self._viewer_threads if thread.is_alive()
+        ]
+        if still_running:
+            LOG.warning(
+                "MuJoCo viewer threads did not stop before timeout: %s",
+                ", ".join(still_running),
+            )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -619,8 +978,32 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="publish commands to the real H1; omitted means dry-run",
     )
+    parser.add_argument(
+        "--allow-hard-limit-start",
+        action="store_true",
+        help=(
+            "use mechanical hard limits for live startup and IK so enabling "
+            "holds the measured pose even inside the normal 5-degree margin"
+        ),
+    )
     parser.add_argument("--frequency", type=float, default=20.0)
-    parser.add_argument("--arm-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--arm-scale",
+        type=float,
+        default=0.7,
+        help="VR translation scale; 0.7 is validated against recorded H1 motion",
+    )
+    parser.add_argument(
+        "--controller-mapping",
+        choices=("same-side", "mirrored"),
+        default=None,
+        help=(
+            "same-side maps Pico left/right to robot left/right; mirrored maps "
+            "Pico left to robot right and Pico right to robot left, matching "
+            "face-to-face operation and reverses lateral translation. Required "
+            "with --live"
+        ),
+    )
     parser.add_argument("--ema-alpha", type=float, default=0.8)
     parser.add_argument("--position-deadband-m", type=float, default=0.01)
     parser.add_argument("--rotation-deadband-deg", type=float, default=3.0)
@@ -635,7 +1018,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max-tracking-error", type=float, default=0.35)
-    parser.add_argument("--state-timeout", type=float, default=0.5)
+    parser.add_argument("--state-timeout", type=float, default=0.25)
+    parser.add_argument(
+        "--pico-timeout",
+        type=float,
+        default=0.25,
+        help="maximum age in seconds of the latest Pico controller frame",
+    )
+    parser.add_argument(
+        "--max-arm-speed-at-arm",
+        type=float,
+        default=0.2,
+        help="maximum measured absolute arm velocity allowed when arming (rad/s)",
+    )
     parser.add_argument("--ik-max-iters", type=int, default=60)
     parser.add_argument(
         "--ik-tolerance",
@@ -649,8 +1044,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.06,
         help=(
             "IK position-error safety envelope (m); above this the frame is "
-            "held/rejected. Raised from 0.04 to give --current-q-weight's "
-            "steady-state residual headroom before it trips the safety hold"
+            "held in dry-run or disarmed in live mode"
         ),
     )
     parser.add_argument("--max-ik-rotation-error-deg", type=float, default=5.0)
@@ -658,16 +1052,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--current-q-weight",
         type=float,
-        default=0.01,
+        default=0.0001,
         help=(
-            "joint-space pullback toward the solve's starting arm state; "
-            "constrains the redundant 7-DOF null space so the elbow cannot flip "
-            "between IK branches on nearly identical targets (the main cause of "
-            "large IK joint jumps). Any value above ~0 raises the IK's steady-"
-            "state residual (it trades exact task convergence for null-space "
-            "stability), so keep this small — larger values push the residual "
-            "toward --max-ik-position-error and trigger holds sooner. 0 "
-            "disables it"
+            "small joint-space pullback toward the solve's starting state; "
+            "0.0001 prevented redundant-arm branch flips in recorded H1 replay "
+            "without the large task residual caused by the previous 0.01 default"
         ),
     )
     parser.add_argument(
@@ -690,15 +1079,44 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="record synchronized LeRobot videos/state/action and legacy JSON",
     )
+    parser.add_argument(
+        "--no-rerun",
+        action="store_true",
+        help="disable the old EpisodeWriter Rerun visualization",
+    )
+    parser.add_argument(
+        "--no-raw-record",
+        dest="raw_record",
+        action="store_false",
+        help="disable asynchronous raw camera/Pico/ROS stream recording",
+    )
+    parser.set_defaults(raw_record=True)
+    parser.add_argument(
+        "--raw-record-queue-size",
+        type=int,
+        default=8192,
+        help="maximum queued raw events before drops are counted",
+    )
     parser.add_argument("--img-server-ip", default="192.168.31.3")
     parser.add_argument("--task-dir", default=str(default_task_dir))
     parser.add_argument("--task-name", default="topstar_h1_mujoco_test")
     parser.add_argument("--task-goal", default="TOPSTAR H1 arm teleoperation")
     parser.add_argument("--task-desc", default="MuJoCo IK Pico teleoperation")
+    parser.add_argument(
+        "--task-steps",
+        default="incremental Pico arm teleoperation",
+        help="task steps stored in the legacy episode metadata",
+    )
     parser.add_argument("--lerobot-repo-id", default=None)
     parser.add_argument("--sync-tolerance-s", type=float, default=1e-4)
     parser.add_argument(
         "--camera-sync-tolerance-s", type=float, default=0.02
+    )
+    parser.add_argument(
+        "--max-camera-age-s",
+        type=float,
+        default=0.10,
+        help="maximum camera age recorded in alignment metadata",
     )
     parser.add_argument("--video-codec", default="h264")
     parser.add_argument(
@@ -719,6 +1137,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         "max_joint_speed": args.max_joint_speed,
         "max_tracking_error": args.max_tracking_error,
         "state_timeout": args.state_timeout,
+        "pico_timeout": args.pico_timeout,
+        "max_arm_speed_at_arm": args.max_arm_speed_at_arm,
         "ik_tolerance": args.ik_tolerance,
         "ik_damping": args.ik_damping,
         "max_ik_position_error": args.max_ik_position_error,
@@ -746,8 +1166,22 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--task-name cannot be empty when recording")
         if args.sync_tolerance_s < 0.0 or args.camera_sync_tolerance_s < 0.0:
             raise ValueError("recording tolerances must be non-negative")
+        if args.max_camera_age_s < 0.0:
+            raise ValueError("--max-camera-age-s must be non-negative")
+        if args.raw_record_queue_size <= 0:
+            raise ValueError("--raw-record-queue-size must be greater than zero")
         if not args.video_codec.strip():
             raise ValueError("--video-codec cannot be empty")
+    if args.live and args.controller_mapping is None:
+        raise ValueError(
+            "--live requires an explicit --controller-mapping "
+            "{same-side,mirrored}"
+        )
+    if args.live and args.mujoco_viewer:
+        raise ValueError(
+            "--mujoco-viewer is disabled with --live; verify mapping in "
+            "dry-run, then close the viewer before commanding the robot"
+        )
 
 
 def _state_message(controller: Any) -> Any:
@@ -782,6 +1216,20 @@ def _seed_robot_command(
         controller.last_published_torso = torso_q.copy()
 
 
+def _start_h1_controller(frequency: float) -> Any:
+    """Construct the real H1 controller only after live CLI validation."""
+    from teleop.robot_control._base.control_mode import ControlMode
+    from teleop.robot_control.topstar_h1.arm_controller import H1ArmController
+    from teleop.robot_control.topstar_h1.config import H1RobotConfig
+
+    return H1ArmController(
+        H1RobotConfig(),
+        ControlMode.ARMS_HEAD,
+        frequency=frequency,
+        simulation_mode=False,
+    )
+
+
 def _start_televuer() -> Any:
     from televuer import TeleVuerWrapper
 
@@ -804,7 +1252,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     repo_root = Path(__file__).resolve().parents[1]
-    solver = H1MuJoCoLMIK.from_h1_assets(repo_root)
+    arm_limit_mode = (
+        "hard" if args.live and args.allow_hard_limit_start else "safe"
+    )
+    solver = H1MuJoCoLMIK.from_h1_assets(
+        repo_root, arm_limit_mode=arm_limit_mode
+    )
+    controller_mapping = args.controller_mapping or "same-side"
+    LOG.info("Controller mapping: %s", controller_mapping)
     max_solver_jump = args.max_solver_jump
     if max_solver_jump is None:
         max_solver_jump = 0.35 if args.live else 0.8
@@ -828,13 +1283,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.max_ik_rotation_error_deg
         ),
         hold_on_ik_safety=not args.live,
+        mirror_lateral_translation=controller_mapping == "mirrored",
     )
 
     controller = None
     tv_wrapper = None
     image_client = None
+    raw_writer = None
     mujoco_viewer: H1MuJoCoViewer | None = None
     recording_session: FormalRecordingSession | None = None
+    last_valid_q: np.ndarray | None = None
+    last_valid_state_receive_ns = 0
+    pico_connected = False
     stop_requested = False
 
     def request_stop(_signum: int, _frame: Any) -> None:
@@ -846,23 +1306,45 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.live:
-            from teleop.robot_control._base.control_mode import ControlMode
-            from teleop.robot_control.topstar_h1.arm_controller import H1ArmController
-            from teleop.robot_control.topstar_h1.config import H1RobotConfig
-
             LOG.warning("LIVE MODE: commands will be published to TOPSTAR_H1")
-            controller = H1ArmController(
-                H1RobotConfig(),
-                ControlMode.ARMS_HEAD,
-                frequency=args.frequency,
-                simulation_mode=False,
-            )
+            if args.allow_hard_limit_start:
+                LOG.warning(
+                    "HARD-LIMIT HOLD MODE: the measured pose is captured without "
+                    "motion and IK uses mechanical limits instead of the normal "
+                    "5-degree margin"
+                )
+            controller = _start_h1_controller(args.frequency)
             initial_state = _wait_for_robot_state(controller)
-            current_q = controller.get_current_dual_arm_q()
+            current_q, current_dq, state_receive_ns = _read_robot_arm_state(
+                controller
+            )
+            if not monotonic_timestamp_is_fresh(
+                state_receive_ns,
+                args.state_timeout,
+            ):
+                raise LiveSafetyError(
+                    "initial /lowstate snapshot is stale; no command was sent"
+                )
+            current_q, current_dq = _validate_robot_arm_state(
+                solver,
+                current_q,
+                current_dq,
+            )
+            publishers, subscribers = _validate_ros_command_graph(controller)
             _seed_robot_command(controller, current_q, initial_state)
+            last_valid_q = current_q.copy()
+            last_valid_state_receive_ns = state_receive_ns
+            LOG.info(
+                "Robot preflight passed: /lowcmd publishers=%d subscribers=%d, "
+                "max |dq|=%.4f rad/s",
+                publishers,
+                subscribers,
+                float(np.max(np.abs(current_dq))),
+            )
         else:
             LOG.info("DRY-RUN MODE: no ROS2 controller and no robot output")
             current_q = _as_arm_q(args.dry_run_initial_q, "dry-run initial q")
+            current_dq = np.zeros(H1_ARM_DOF, dtype=np.float64)
 
         if args.mujoco_viewer:
             mujoco_viewer = H1MuJoCoViewer(solver)
@@ -876,6 +1358,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 build_camera_key_plan,
                 default_repo_id,
             )
+            from teleop.utils.episode_writer import EpisodeWriter
+            from teleop.utils.raw_session_writer import RawSessionWriter
             from teleop.utils.record import Recorder
 
             image_client = ImageClient(
@@ -921,6 +1405,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_depth_keys=expected_depth_keys,
                 vcodec=args.video_codec,
             )
+            image_shape = (camera_config.get("head_camera") or {}).get(
+                "image_shape", [480, 640]
+            )
+            if len(image_shape) < 2:
+                image_shape = [480, 640]
+            legacy_episode_writer = EpisodeWriter(
+                task_dir=str(output_root),
+                task_goal=args.task_goal,
+                task_desc=args.task_desc,
+                task_steps=args.task_steps,
+                frequency=args.frequency,
+                image_size=[int(image_shape[1]), int(image_shape[0])],
+                rerun_log=not args.no_rerun,
+                tolerance_s=args.sync_tolerance_s,
+            )
+            raw_writer = (
+                RawSessionWriter(
+                    output_root,
+                    queue_size=args.raw_record_queue_size,
+                )
+                if args.raw_record
+                else None
+            )
+            if raw_writer is not None and controller is not None and hasattr(
+                controller, "set_raw_event_sink"
+            ):
+                controller.set_raw_event_sink(raw_writer.append_event)
             recording_session = FormalRecordingSession(
                 image_client=image_client,
                 camera_config=camera_config,
@@ -933,25 +1444,109 @@ def main(argv: Sequence[str] | None = None) -> int:
                 frequency=args.frequency,
                 sync_tolerance_s=args.sync_tolerance_s,
                 camera_sync_tolerance_s=args.camera_sync_tolerance_s,
+                legacy_episode_writer=legacy_episode_writer,
+                raw_writer=raw_writer,
+                max_camera_age_s=args.max_camera_age_s,
             )
             LOG.info("Recording ready: %s", output_root)
 
         tv_wrapper = _start_televuer()
         LOG.info("Open https://<this-computer-ip>:8012 in Pico")
         LOG.info("Left A: arm/disarm both arms; Right A: disarm; Ctrl-C: exit")
+        if controller_mapping == "mirrored":
+            LOG.warning(
+                "MIRRORED mapping: Pico left controls robot right; "
+                "Pico right controls robot left; lateral translation is reversed"
+            )
+        else:
+            LOG.warning(
+                "SAME-SIDE mapping: Pico left controls robot left; "
+                "Pico right controls robot right"
+            )
         if recording_session is not None:
-            LOG.info("Left B/Y: start/stop and save one recording episode")
+            LOG.info(
+                "Left B/Y: start/stop recording; "
+                "Right B/X: discard latest episode"
+            )
+        LOG.info(
+            "Left Grip: return to HOME after releasing it; "
+            "HOME is also performed once at startup"
+        )
 
-        freshness = StateFreshnessMonitor(args.state_timeout)
+        def _drain_raw_xr_events() -> None:
+            if raw_writer is None or tv_wrapper is None:
+                return
+            drain = getattr(tv_wrapper, "drain_raw_xr_events", None)
+            if drain is None:
+                return
+            for event in drain():
+                raw_writer.append_event("pico", event)
+
         previous_left_a = False
         previous_right_a = False
         previous_left_b = False
+        previous_right_b = False
         last_cycle = time.monotonic()
         nominal_dt = 1.0 / args.frequency
         next_cycle = last_cycle
         last_status = 0.0
         reference_settle_deadline = 0.0
         last_invalid_wrist_log = 0.0
+        last_invalid_state_log = 0.0
+        home_left_grip_armed = False
+
+        def _return_home() -> bool:
+            """Run H1ArmController.go_home and rebase the live state."""
+            nonlocal current_q, current_dq, state_receive_ns
+            nonlocal last_valid_q, last_valid_state_receive_ns
+            nonlocal reference_settle_deadline
+            if not args.live:
+                return True
+            if controller is None or not hasattr(controller, "go_home"):
+                LOG.error("Cannot start recording: controller has no go_home()")
+                return False
+            try:
+                core.disarm()
+                controller.go_home()
+                if hasattr(controller, "wait_for_hold_expire"):
+                    controller.wait_for_hold_expire(timeout=10.0)
+                current_q, current_dq, state_receive_ns = (
+                    _read_robot_arm_state(controller)
+                )
+                if not monotonic_timestamp_is_fresh(
+                    state_receive_ns, args.state_timeout
+                ):
+                    raise LiveSafetyError("/lowstate is stale after go_home()")
+                current_q, current_dq = _validate_robot_arm_state(
+                    solver, current_q, current_dq
+                )
+                if hasattr(controller, "reset_arm_command_reference"):
+                    controller.reset_arm_command_reference(current_q)
+                last_valid_q = current_q.copy()
+                last_valid_state_receive_ns = state_receive_ns
+                reference_settle_deadline = 0.0
+                LOG.info("go_home() reached; measured state rebased")
+                return True
+            except Exception as exc:
+                core.disarm()
+                LOG.error("go_home() failed: %s", exc)
+                return False
+
+        def _go_home_before_recording(
+            left_pose: np.ndarray, right_pose: np.ndarray
+        ) -> bool:
+            """Compatibility helper retained for callers/tests."""
+            nonlocal reference_settle_deadline
+            if not _return_home():
+                return False
+            core.arm(current_q, left_pose, right_pose)
+            reference_settle_deadline = time.monotonic() + 0.5
+            return True
+
+        if args.live:
+            if not _return_home():
+                raise LiveSafetyError("initial go_home() failed")
+            LOG.info("Initial go_home() completed; press Left A to arm teleoperation")
 
         while not stop_requested:
             now = time.monotonic()
@@ -963,11 +1558,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             last_cycle = now
 
             if args.live:
-                state = _state_message(controller)
-                if not freshness.observe(state, now):
+                try:
+                    measured_q, measured_dq, state_receive_ns = (
+                        _read_robot_arm_state(controller)
+                    )
+                    if not monotonic_timestamp_is_fresh(
+                        state_receive_ns,
+                        args.state_timeout,
+                        now_ns=time.monotonic_ns(),
+                    ):
+                        raise LiveSafetyError(
+                            "/lowstate is stale or missing"
+                        )
+                    measured_q, measured_dq = _validate_robot_arm_state(
+                        solver,
+                        measured_q,
+                        measured_dq,
+                    )
+                except Exception as exc:
                     if core.active:
                         core.disarm()
-                        LOG.error("DISARMED: /lowstate is stale or missing")
+                        if last_valid_q is not None:
+                            _send_robot_hold(controller, solver, last_valid_q)
+                        LOG.error("DISARMED: invalid /lowstate: %s", exc)
                         if (
                             recording_session is not None
                             and recording_session.active
@@ -979,8 +1592,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 LOG.exception(
                                     "failed to save recording after /lowstate timeout"
                                 )
+                    elif now - last_invalid_state_log >= 1.0:
+                        last_invalid_state_log = now
+                        LOG.error("Waiting for valid /lowstate: %s", exc)
                     continue
-                current_q = controller.get_current_dual_arm_q()
+                current_q = measured_q
+                current_dq = measured_dq
+                last_valid_q = current_q.copy()
+                last_valid_state_receive_ns = state_receive_ns
 
             if mujoco_viewer is not None:
                 if not mujoco_viewer.is_running():
@@ -992,26 +1611,86 @@ def main(argv: Sequence[str] | None = None) -> int:
             if process is not None and not process.is_alive():
                 raise RuntimeError("TeleVuer subprocess stopped")
             tele_data = tv_wrapper.get_tele_data()
+            _drain_raw_xr_events()
+            pico_timestamp_ns = int(
+                getattr(tele_data, "controller_pose_timestamp_ns", 0) or 0
+            )
+            if not monotonic_timestamp_is_fresh(
+                pico_timestamp_ns,
+                args.pico_timeout,
+                now_ns=time.monotonic_ns(),
+            ):
+                if pico_connected:
+                    pico_connected = False
+                    LOG.info("Pico controller connection closed")
+                if core.active:
+                    core.disarm()
+                    reference_settle_deadline = 0.0
+                    if controller is not None:
+                        _send_robot_hold(controller, solver, current_q)
+                    LOG.error(
+                        "DISARMED: Pico controller data is stale; "
+                        "holding measured pose"
+                    )
+                    if recording_session is not None and recording_session.active:
+                        try:
+                            recording_session.stop()
+                            LOG.info("Recording saved after Pico timeout")
+                        except Exception:
+                            LOG.exception(
+                                "failed to save recording after Pico timeout"
+                            )
+                continue
+            if not pico_connected:
+                pico_connected = True
+                LOG.info("Pico controller connected")
+
             wrists_valid = bool(
                 getattr(tele_data, "left_wrist_valid", True)
                 and getattr(tele_data, "right_wrist_valid", True)
+            )
+            left_wrist_pose, right_wrist_pose = mapped_wrist_poses(
+                tele_data, controller_mapping
             )
 
             left_a = bool(tele_data.left_ctrl_aButton)
             right_a = bool(tele_data.right_ctrl_aButton)
             left_b = bool(tele_data.left_ctrl_bButton)
+            right_b = bool(getattr(tele_data, "right_ctrl_bButton", False))
+            left_grip_pressed = bool(
+                getattr(tele_data, "left_ctrl_squeeze", False)
+            ) or float(
+                getattr(tele_data, "left_ctrl_squeezeValue", 0.0) or 0.0
+            ) > 0.5
+            if not left_grip_pressed:
+                home_left_grip_armed = True
+            left_grip_rising = left_grip_pressed and home_left_grip_armed
             left_a_rising = left_a and not previous_left_a
             right_a_rising = right_a and not previous_right_a
             left_b_rising = left_b and not previous_left_b
+            right_b_rising = right_b and not previous_right_b
             previous_left_a = left_a
             previous_right_a = right_a
             previous_left_b = left_b
+            previous_right_b = right_b
+
+            if left_grip_rising:
+                home_left_grip_armed = False
+                if recording_session is not None and recording_session.active:
+                    LOG.warning(
+                        "Left Grip HOME ignored: stop the active recording first"
+                    )
+                elif core.active:
+                    LOG.warning("Left Grip HOME ignored: stop teleoperation first")
+                elif _return_home():
+                    LOG.info("Left Grip HOME completed")
+                continue
 
             if right_a_rising and core.active:
                 core.disarm()
                 reference_settle_deadline = 0.0
                 if controller is not None:
-                    controller.servo_dual_arm(current_q, np.zeros(H1_ARM_DOF))
+                    _send_robot_hold(controller, solver, current_q)
                 LOG.warning("DISARMED by Right A; holding measured pose")
                 if recording_session is not None and recording_session.active:
                     try:
@@ -1026,7 +1705,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     core.disarm()
                     reference_settle_deadline = 0.0
                     if controller is not None:
-                        controller.servo_dual_arm(current_q, np.zeros(H1_ARM_DOF))
+                        _send_robot_hold(controller, solver, current_q)
                     LOG.warning("DISARMED by Left A; holding measured pose")
                     if recording_session is not None and recording_session.active:
                         try:
@@ -1040,11 +1719,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "Arm request ignored: Pico controller pose is not valid yet"
                         )
                         continue
-                    core.arm(
-                        current_q,
-                        tele_data.left_wrist_pose,
-                        tele_data.right_wrist_pose,
-                    )
+                    if args.live and float(np.max(np.abs(current_dq))) > (
+                        args.max_arm_speed_at_arm
+                    ):
+                        LOG.warning(
+                            "Arm request ignored: max measured |dq| %.4f rad/s "
+                            "exceeds %.4f rad/s",
+                            float(np.max(np.abs(current_dq))),
+                            args.max_arm_speed_at_arm,
+                        )
+                        continue
+                    with (
+                        mujoco_viewer.lock()
+                        if mujoco_viewer is not None
+                        else nullcontext()
+                    ):
+                        core.arm(
+                            current_q,
+                            left_wrist_pose,
+                            right_wrist_pose,
+                        )
                     reference_settle_deadline = now + 0.5
                     LOG.warning(
                         "ARMED: stabilizing Pico wrist references for 0.5 seconds"
@@ -1060,9 +1754,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     try:
                         recording_session.start()
-                        LOG.warning("RECORDING STARTED: three camera frames verified")
+                        LOG.warning(
+                            "RECORDING STARTED: three camera frames verified"
+                        )
                     except Exception as exc:
                         LOG.error("Recording did not start: %s", exc)
+                continue
+
+            if right_b_rising and recording_session is not None:
+                try:
+                    if recording_session.active:
+                        recording_session.discard()
+                        LOG.warning("Recording episode discarded")
+                    else:
+                        recording_session.discard_latest()
+                        LOG.warning("Latest recording episode discarded")
+                except Exception as exc:
+                    LOG.error("Recording discard failed: %s", exc)
                 continue
 
             if not core.active:
@@ -1072,9 +1780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.live:
                     core.disarm()
                     if controller is not None:
-                        controller.servo_dual_arm(
-                            current_q, np.zeros(H1_ARM_DOF)
-                        )
+                        _send_robot_hold(controller, solver, current_q)
                     LOG.error(
                         "DISARMED: Pico controller pose became invalid; "
                         "holding measured pose"
@@ -1091,11 +1797,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # Pico can report a stale pose for a few frames around a button
                 # press. Re-capture until it settles so that sample cannot become
                 # the fixed teleoperation reference.
-                core.arm(
-                    current_q,
-                    tele_data.left_wrist_pose,
-                    tele_data.right_wrist_pose,
-                )
+                with (
+                    mujoco_viewer.lock()
+                    if mujoco_viewer is not None
+                    else nullcontext()
+                ):
+                    core.arm(
+                        current_q,
+                        left_wrist_pose,
+                        right_wrist_pose,
+                    )
                 continue
 
             camera_batch = None
@@ -1104,16 +1815,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             control_cycle_timestamp_ns = time.time_ns()
             measured_q_for_frame = current_q.copy()
             try:
-                step_result = core.step(
-                    current_q,
-                    tele_data.left_wrist_pose,
-                    tele_data.right_wrist_pose,
-                    dt,
-                )
+                with (
+                    mujoco_viewer.lock()
+                    if mujoco_viewer is not None
+                    else nullcontext()
+                ):
+                    step_result = core.step(
+                        current_q,
+                        left_wrist_pose,
+                        right_wrist_pose,
+                        dt,
+                    )
             except (LiveSafetyError, ValueError, np.linalg.LinAlgError) as exc:
                 core.disarm()
                 if controller is not None:
-                    controller.servo_dual_arm(current_q, np.zeros(H1_ARM_DOF))
+                    _send_robot_hold(controller, solver, current_q)
                 LOG.error("DISARMED by safety check: %s", exc)
                 if recording_session is not None and recording_session.active:
                     try:
@@ -1126,7 +1842,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             current_q = step_result.command_q.copy() if not args.live else current_q
             if controller is not None:
                 controller.servo_dual_arm(
-                    step_result.command_q, np.zeros(H1_ARM_DOF)
+                    step_result.command_q,
+                    solver.gravity_compensation(step_result.command_q),
                 )
             if mujoco_viewer is not None:
                 mujoco_viewer.update(step_result.command_q)
@@ -1142,6 +1859,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     accepted_approximately=step_result.accepted_approximately,
                     control_cycle_timestamp_ns=control_cycle_timestamp_ns,
                     robot_step_done_timestamp_ns=robot_step_done_timestamp_ns,
+                    pico_timestamp_ns=pico_timestamp_ns,
+                    state_receive_timestamp_ns=(
+                        state_receive_ns if args.live else None
+                    ),
                 )
 
             if now - last_status >= 1.0:
@@ -1162,13 +1883,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if core.active:
             core.disarm()
-        if controller is not None:
-            try:
-                measured = controller.get_current_dual_arm_q()
-                controller.servo_dual_arm(measured, np.zeros(H1_ARM_DOF))
-                time.sleep(0.1)
-            except Exception:
-                LOG.exception("failed to send final hold command")
+        if (
+            controller is not None
+            and last_valid_q is not None
+            and bool(getattr(controller, "_arm_active", False))
+        ):
+            if monotonic_timestamp_is_fresh(
+                last_valid_state_receive_ns, args.state_timeout
+            ):
+                try:
+                    _send_robot_hold(controller, solver, last_valid_q)
+                    time.sleep(0.1)
+                except Exception:
+                    LOG.exception("failed to send final hold command")
+            else:
+                LOG.warning(
+                    "Skipped final hold because the last /lowstate is stale"
+                )
         if recording_session is not None:
             try:
                 recording_session.close()
@@ -1176,6 +1907,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 LOG.exception("failed to finalize recording")
         if controller is not None:
             controller.stop()
+        if pico_connected:
+            pico_connected = False
+            LOG.info("Pico controller connection closed")
         if tv_wrapper is not None:
             tv_wrapper.close()
         if image_client is not None:

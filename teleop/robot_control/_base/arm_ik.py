@@ -248,6 +248,16 @@ class BaseArmIK(ABC):
         right_pos = self.reduced_robot.data.oMf[self.R_hand_id].translation.copy()
         return left_pos, right_pos
 
+    def reset_smoothing(self, arm_q: np.ndarray) -> None:
+        """Reset the command filter at a measured arm configuration."""
+        value = np.asarray(arm_q, dtype=float).reshape(-1)
+        expected = len(self.arm_joint_indices)
+        if value.size < expected:
+            raise ValueError(
+                f"arm_q has {value.size} values, expected at least {expected}"
+            )
+        self.smooth_filter.reset(value[:expected])
+
     def get_dual_arm_ee_poses(self, q_deg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """正运动学 — 从关节角(度)计算完整末端位姿 (4×4)。
 
@@ -441,10 +451,20 @@ class BaseArmIK(ABC):
         regularization_cost = casadi.sumsqr(self.var_q)
         smooth_cost = casadi.sumsqr(self.var_q - self.var_q_last)
 
+        # The normal safe-margin solver retains the historical weak pull
+        # toward zero.  Hard-limit startup is used for measured HOME poses
+        # inside the mechanical envelope but outside that margin.  Pulling
+        # those poses toward zero would create motion on the very first IK
+        # frame even when both wrist targets are unchanged, so hard mode uses
+        # only the measured-state smoothness term as joint regularization.
+        zero_pose_regularization_weight = (
+            0.0 if self.config.limit_mode == "hard" else 0.02
+        )
+
         total_cost = (
             50.0 * translational_cost
             + 1.0 * rotation_cost
-            + 0.02 * regularization_cost
+            + zero_pose_regularization_weight * regularization_cost
             + 0.1 * smooth_cost
         )
 

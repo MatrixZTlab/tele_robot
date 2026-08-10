@@ -38,6 +38,54 @@ H1_RIGHT_ARM_JOINT_NAMES = tuple(
     name.replace("Left", "Right") for name in H1_LEFT_ARM_JOINT_NAMES
 )
 
+# Hardware-convention limits converted to the 14-value simulation convention
+# used by H1ArmController, H1ArmIK, and this MuJoCo solver.  These are the same
+# limits used by the proven Pinocchio/CasADi H1 path.  The repository URDF is
+# not authoritative here: for example, it limits the left base joint to
+# -1.57 rad even though recorded, valid H1 states routinely reach -2.0 rad,
+# while several wrist ranges are substantially wider than the hardware range.
+H1_HARD_ARM_LOWER = np.array(
+    [
+        -2.61799388,
+        -1.57079633,
+        -2.61799388,
+        -0.43633231,
+        -2.87979327,
+        -0.43633231,
+        -2.96705973,
+        -2.61799388,
+        -1.57079633,
+        -2.61799388,
+        -1.79768913,
+        -2.87979327,
+        -1.53588974,
+        -2.96705973,
+    ],
+    dtype=np.float64,
+)
+H1_HARD_ARM_UPPER = np.array(
+    [
+        2.61799388,
+        0.43633231,
+        2.61799388,
+        1.79768913,
+        2.87979327,
+        1.53588974,
+        2.96705973,
+        2.61799388,
+        0.43633231,
+        2.61799388,
+        0.43633231,
+        2.87979327,
+        0.43633231,
+        2.96705973,
+    ],
+    dtype=np.float64,
+)
+_H1_JOINT_SAFETY_MARGIN_RAD = math.radians(5.0)
+H1_SAFE_ARM_LOWER = H1_HARD_ARM_LOWER + _H1_JOINT_SAFETY_MARGIN_RAD
+H1_SAFE_ARM_UPPER = H1_HARD_ARM_UPPER - _H1_JOINT_SAFETY_MARGIN_RAD
+
 
 def _validate_rotation(rotation: np.ndarray, name: str) -> np.ndarray:
     value = np.asarray(rotation, dtype=np.float64)
@@ -189,6 +237,7 @@ class VRRelativePoseTracker:
         position_deadband: float = 0.0,
         rotation_deadband_deg: float = 0.0,
         negate_rot_xy: bool = False,
+        translation_axis_sign: Sequence[float] = (1.0, 1.0, 1.0),
     ) -> None:
         if not np.isfinite(position_scale) or position_scale <= 0.0:
             raise ValueError("position_scale must be finite and greater than zero")
@@ -209,6 +258,12 @@ class VRRelativePoseTracker:
         self._position_deadband = float(position_deadband)
         self._rotation_deadband_rad = math.radians(rotation_deadband_deg)
         self._negate_rot_xy = bool(negate_rot_xy)
+        translation_sign = np.asarray(translation_axis_sign, dtype=np.float64)
+        if translation_sign.shape != (3,) or not np.all(
+            np.isin(translation_sign, (-1.0, 1.0))
+        ):
+            raise ValueError("translation_axis_sign must contain three +/-1 values")
+        self._translation_axis_sign = translation_sign.copy()
 
         self._initial_ee_pose = _validate_pose(initial_ee_pose, "initial_ee_pose")
         self._target_pose = self._initial_ee_pose.copy()
@@ -254,8 +309,9 @@ class VRRelativePoseTracker:
             self._reference_wrist_pose = wrist.copy()
             return self.target_pose
 
-        translation = self._basis @ (
-            wrist[:3, 3] - self._reference_wrist_pose[:3, 3]
+        translation = self._translation_axis_sign * (
+            self._basis
+            @ (wrist[:3, 3] - self._reference_wrist_pose[:3, 3])
         )
         if self._smoothed_translation is None:
             self._smoothed_translation = translation
@@ -501,6 +557,8 @@ class H1MuJoCoLMIK:
         left_body_id: int,
         right_body_id: int,
         ee_offset: Sequence[float],
+        arm_joint_lower: Sequence[float] | None = None,
+        arm_joint_upper: Sequence[float] | None = None,
     ) -> None:
         self._mj = mujoco_api
         self._model = model
@@ -528,10 +586,44 @@ class H1MuJoCoLMIK:
             raise ValueError("ee_offset must contain three finite values")
         self._ee_offset = offset.copy()
         self._base_qpos = np.asarray(model.qpos0, dtype=np.float64).copy()
+        if (arm_joint_lower is None) != (arm_joint_upper is None):
+            raise ValueError(
+                "arm_joint_lower and arm_joint_upper must be provided together"
+            )
+        if arm_joint_lower is None:
+            lower = np.full(_H1_ARM_DOF, -np.inf, dtype=np.float64)
+            upper = np.full(_H1_ARM_DOF, np.inf, dtype=np.float64)
+            for index, joint_id in enumerate(self._joint_ids):
+                if bool(model.jnt_limited[joint_id]):
+                    lower[index], upper[index] = model.jnt_range[joint_id]
+        else:
+            lower = np.asarray(arm_joint_lower, dtype=np.float64)
+            upper = np.asarray(arm_joint_upper, dtype=np.float64)
+            if lower.shape != (_H1_ARM_DOF,) or upper.shape != (_H1_ARM_DOF,):
+                raise ValueError("arm joint limits must each contain 14 values")
+            if not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper)):
+                raise ValueError("arm joint limits must contain only finite values")
+        if np.any(lower >= upper):
+            raise ValueError("every arm joint lower limit must be below its upper limit")
+        self._arm_joint_lower = lower.copy()
+        self._arm_joint_upper = upper.copy()
 
     @classmethod
-    def from_h1_assets(cls, repo_root: str | Path | None = None) -> "H1MuJoCoLMIK":
-        """Load the repository H1 URDF with its standard arm/body mapping."""
+    def from_h1_assets(
+        cls,
+        repo_root: str | Path | None = None,
+        *,
+        arm_limit_mode: str = "safe",
+    ) -> "H1MuJoCoLMIK":
+        """Load the H1 URDF using either safe-margin or mechanical limits."""
+        if arm_limit_mode == "safe":
+            arm_joint_lower = H1_SAFE_ARM_LOWER
+            arm_joint_upper = H1_SAFE_ARM_UPPER
+        elif arm_limit_mode == "hard":
+            arm_joint_lower = H1_HARD_ARM_LOWER
+            arm_joint_upper = H1_HARD_ARM_UPPER
+        else:
+            raise ValueError("arm_limit_mode must be 'safe' or 'hard'")
         root = (
             Path(repo_root).expanduser().resolve()
             if repo_root is not None
@@ -544,6 +636,8 @@ class H1MuJoCoLMIK:
             left_ee_body="Robot_Left_Hand_6_Link",
             right_ee_body="Robot_Right_Hand_6_Link",
             ee_offset=(0.0, 0.0, 0.03),
+            arm_joint_lower=arm_joint_lower,
+            arm_joint_upper=arm_joint_upper,
         )
 
     @classmethod
@@ -556,6 +650,8 @@ class H1MuJoCoLMIK:
         left_ee_body: str,
         right_ee_body: str,
         ee_offset: Sequence[float] = (0.0, 0.0, 0.03),
+        arm_joint_lower: Sequence[float] | None = None,
+        arm_joint_upper: Sequence[float] | None = None,
     ) -> "H1MuJoCoLMIK":
         """Load an H1 URDF and resolve the exact 14 arm degrees of freedom."""
         if len(left_joint_names) != 7 or len(right_joint_names) != 7:
@@ -596,6 +692,8 @@ class H1MuJoCoLMIK:
             left_body_id,
             right_body_id,
             ee_offset,
+            arm_joint_lower,
+            arm_joint_upper,
         )
 
     def _validate_arm_q(self, arm_q: np.ndarray) -> np.ndarray:
@@ -610,6 +708,23 @@ class H1MuJoCoLMIK:
         qpos = self._base_qpos.copy()
         qpos[self._qpos_addresses] = arm_q
         return qpos
+
+    @property
+    def arm_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return defensive copies of the solver command limits."""
+        return self._arm_joint_lower.copy(), self._arm_joint_upper.copy()
+
+    def arm_q_within_limits(
+        self, arm_q: np.ndarray, *, tolerance: float = 0.0
+    ) -> bool:
+        """Whether a finite 14-joint state is inside the command envelope."""
+        value = self._validate_arm_q(arm_q)
+        if not np.isfinite(tolerance) or tolerance < 0.0:
+            raise ValueError("tolerance must be finite and non-negative")
+        return bool(
+            np.all(value >= self._arm_joint_lower - tolerance)
+            and np.all(value <= self._arm_joint_upper + tolerance)
+        )
 
     def _tool_pose_and_jacobian(
         self, body_id: int
@@ -677,10 +792,11 @@ class H1MuJoCoLMIK:
         )
 
     def _clip_arm_joints(self, qpos: np.ndarray) -> None:
-        for joint_id, qpos_address in zip(self._joint_ids, self._qpos_addresses):
-            if bool(self._model.jnt_limited[joint_id]):
-                lower, upper = self._model.jnt_range[joint_id]
-                qpos[qpos_address] = np.clip(qpos[qpos_address], lower, upper)
+        qpos[self._qpos_addresses] = np.clip(
+            qpos[self._qpos_addresses],
+            self._arm_joint_lower,
+            self._arm_joint_upper,
+        )
 
     def forward_kinematics(
         self, current_arm_q: np.ndarray
@@ -694,6 +810,19 @@ class H1MuJoCoLMIK:
         left_pose, _ = self._tool_pose_and_jacobian(self._left_body_id)
         right_pose, _ = self._tool_pose_and_jacobian(self._right_body_id)
         return left_pose, right_pose
+
+    def gravity_compensation(self, current_arm_q: np.ndarray) -> np.ndarray:
+        """Return H1 arm gravity/bias torques in simulation joint convention."""
+        arm_q = self._validate_arm_q(current_arm_q)
+        self._data.qpos[:] = self._full_qpos(arm_q)
+        self._data.qvel[:] = 0.0
+        self._mj.mj_forward(self._model, self._data)
+        tau = np.asarray(
+            self._data.qfrc_bias[self._dof_addresses], dtype=np.float64
+        ).copy()
+        if tau.shape != (_H1_ARM_DOF,) or not np.all(np.isfinite(tau)):
+            raise ValueError("MuJoCo produced invalid H1 gravity compensation")
+        return tau
 
     def solve(
         self,
@@ -813,8 +942,12 @@ class H1MuJoCoLMIK:
 
 
 __all__ = [
+    "H1_HARD_ARM_LOWER",
+    "H1_HARD_ARM_UPPER",
     "H1_LEFT_ARM_JOINT_NAMES",
     "H1_RIGHT_ARM_JOINT_NAMES",
+    "H1_SAFE_ARM_LOWER",
+    "H1_SAFE_ARM_UPPER",
     "H1_XR_TO_ROBOT_ROTATION",
     "H1MuJoCoLMIK",
     "LMIKResult",

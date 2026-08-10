@@ -178,6 +178,10 @@ def test_offline_aligner_matches_cameras_and_interpolates_state(tmp_path):
     assert frame["alignment"]["valid"] is True
     assert abs(frame["alignment"]["camera_delta_ms"]["left_wrist_camera"]) <= 20.0
     assert len(frame["states"]["left_arm"]["qpos"]) == 7
+    assert frame["states"]["left_arm"]["qvel"] == []
+    assert frame["states"]["right_arm"]["qvel"] == []
+    assert frame["states"]["left_ee"]["qpos"] == []
+    assert frame["states"]["right_ee"]["qpos"] == []
     assert len(frame["actions"]["right_arm"]["qpos"]) == 7
     report = json.loads((output / "alignment_report.json").read_text())
     assert report["camera_clock_models"]["head_camera"]["kind"] == "affine_device_to_capture_host"

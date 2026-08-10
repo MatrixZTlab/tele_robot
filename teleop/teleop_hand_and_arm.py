@@ -32,6 +32,13 @@ from teleop.utils.raw_session_writer import RawSessionWriter
 import queue as _queue
 from sshkeyboard import listen_keyboard, stop_listening
 
+_body_control_profile = os.environ.get("TELE_ROBOT_BODY_CONTROL_PROFILE", "")
+_body_joystick_controller = None
+if _body_control_profile == "h1_arm_head_torso_base":
+    from teleop.teleop_h1_arm_head_torso_base import H1BodyJoystickController
+
+    _body_joystick_controller = H1BodyJoystickController()
+
 # -----------------------------------------------------------------------
 # 底盘缓动工具 — 来自 jog GUI (h1_upper_body_jog.py)
 # -----------------------------------------------------------------------
@@ -96,17 +103,14 @@ RECORD_TOGGLE  = False  # Toggle recording state
 RECORD_DISCARD = False  # Discard current/latest recording
 LAST_RECORD_EPISODE_ID = None  # Latest episode created during this process
 SERVO_TOGGLE = False  # Toggle ServoJ recording (press 'v' to toggle)
+_home_left_squeeze_armed = False  # Require one release after teleop stops.
 
 # Teleop mode: "relative_head" (existing) | "relative_pose" (new)
 TELEOP_MODE = "relative_head"
 
-# Relative-pose mode: per-arm activation
+# Relative-pose mode: both mirrored arms are activated/deactivated together.
 LEFT_ARM_ACTIVE  = False
 RIGHT_ARM_ACTIVE = False
-
-# Right A long-press detection
-_right_a_press_start = 0.0
-_right_a_long_press_triggered = False
 
 # ── 底盘控制（独立于 TELEOP_ACTIVE，模仿 jog GUI）──
 MOTION_ACTIVE = False          # --motion 启动时设为 True
@@ -192,6 +196,7 @@ def on_press(key):
                 LEFT_ARM_ACTIVE = False
                 RIGHT_ARM_ACTIVE = False
                 robot.reset_relative_pose_state('both')
+            robot.reset_dual_object_control()
             logger_mp.info(f"🔄 Teleop mode switched to: {TELEOP_MODE}")
         else:
             logger_mp.warning("Cannot switch mode while teleop is active. Stop teleop first.")
@@ -275,6 +280,20 @@ def _publish_base_cmd(tele_data=None):
     global _base_tgt_vx, _base_tgt_vy, _base_tgt_wz
     global _base_cur_vx, _base_cur_vy, _base_cur_wz, _base_last_t
 
+    if _body_joystick_controller is not None:
+        try:
+            controller = arm_ctrl
+        except NameError:
+            return
+        _body_joystick_controller.update_base(
+            tele_data,
+            controller,
+            enabled=bool(MOTION_ACTIVE and TELEOP_ACTIVE),
+            max_speed=args.body_max_speed,
+            frequency=args.frequency,
+        )
+        return
+
     if not MOTION_ACTIVE:
         return
     try:
@@ -329,6 +348,22 @@ def _publish_torso_cmd(tele_data=None):
     右摇杆 Y 轴 → torso_pitch，经 arm_ctrl.ctrl_torso() → _publish_loop 限速后写入 LowCmd。
     """
     global _torso_pitch_target
+
+    if _body_joystick_controller is not None:
+        if not control_mode.solve_torso:
+            return
+        try:
+            controller = arm_ctrl
+        except NameError:
+            return
+        _body_joystick_controller.update_torso(
+            tele_data,
+            controller,
+            enabled=bool(TELEOP_ACTIVE),
+            frequency=args.frequency,
+        )
+        return
+
     if not control_mode.solve_torso:
         return
     try:
@@ -367,7 +402,61 @@ def get_state() -> dict:
         "TELEOP_MODE": TELEOP_MODE,
         "LEFT_ARM_ACTIVE": LEFT_ARM_ACTIVE,
         "RIGHT_ARM_ACTIVE": RIGHT_ARM_ACTIVE,
+        "DUAL_OBJECT_LOCKED": bool(
+            getattr(globals().get("robot"), "dual_object_locked", False)
+        ),
     }
+
+
+def _consume_right_a_press(tele_data) -> bool:
+    """Return True once on the rising edge of the Pico right A button."""
+    pressed = bool(getattr(tele_data, 'right_ctrl_aButton', False))
+    previous = bool(getattr(tv_wrapper, '_prev_right_ctrl_aButton', False))
+    tv_wrapper._prev_right_ctrl_aButton = pressed
+    return pressed and not previous
+
+
+def _process_home_squeeze(tele_data) -> bool:
+    """Return both arms home on one left-grip press while teleop is stopped."""
+    global _home_left_squeeze_armed
+
+    squeeze_value = float(getattr(tele_data, 'left_ctrl_squeezeValue', 0.0) or 0.0)
+    pressed = bool(getattr(tele_data, 'left_ctrl_squeeze', False)) or squeeze_value > 0.5
+    if not pressed:
+        _home_left_squeeze_armed = True
+        return False
+    if not _home_left_squeeze_armed:
+        return False
+
+    # Consume this press even when rejected; another attempt requires release.
+    _home_left_squeeze_armed = False
+    if TELEOP_ACTIVE:
+        return False
+    if RECORD_RUNNING:
+        logger_mp.warning(
+            "Left Grip HOME ignored: stop the active recording with Left Y first"
+        )
+        return False
+
+    try:
+        robot.reset_dual_object_control()
+        logger_mp.warning("Left Grip: returning both arms to HOME")
+        robot.go_home()
+        if hasattr(arm_ctrl, 'wait_for_hold_expire'):
+            arm_ctrl.wait_for_hold_expire(timeout=5.0)
+
+        # MoveJ bypasses the IK filter. Rebase it at the reached pose before
+        # the next teleop session so stale pre-home samples cannot reappear.
+        if (
+            hasattr(arm_ctrl, 'get_current_dual_arm_q')
+            and hasattr(robot, '_reset_arm_references')
+        ):
+            robot._reset_arm_references(arm_ctrl.get_current_dual_arm_q())
+        logger_mp.info("HOME reached; press Left A to start teleop again")
+        return True
+    except Exception:
+        logger_mp.exception("Failed to return HOME from Left Grip")
+        return False
 
 
 def _process_record_requests():
@@ -491,7 +580,15 @@ if __name__ == '__main__':
     parser.add_argument('--control-mode', type=str, default='arms_head',
                         choices=['arms_only', 'arms_head', 'arms_head_torso', 'full_body'],
                         help='Control mode')
-    parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco', 'suction_cup'], help='Select end effector controller')
+    parser.add_argument(
+        '--ee',
+        type=str,
+        choices=[
+            'dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco',
+            'suction_cup', 'fixed_gripper',
+        ],
+        help='Select end effector controller; fixed_gripper has no active command',
+    )
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
@@ -499,6 +596,15 @@ if __name__ == '__main__':
                         help='Enable chassis / base movement control (keyboard WASDQE or XR controller thumbsticks)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action='store_true', help='Enable simulation mode (passed to RobotDriver, does NOT control body)')
+    parser.add_argument(
+        '--allow-hard-limit-start',
+        action='store_true',
+        help=(
+            'TOPSTAR_H1 only: use mechanical hard limits instead of the normal '
+            '5-degree IK margin. This permits the configured HOME pose while '
+            'retaining the hardware joint envelope.'
+        ),
+    )
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # replay options
@@ -506,6 +612,11 @@ if __name__ == '__main__':
     parser.add_argument('--replay-file', dest='replay_file', type=str, default=None, help='Path to trajectory JSON file for replay')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
+    parser.add_argument(
+        '--no-rerun',
+        action='store_true',
+        help='Disable live Rerun visualization while keeping camera recording enabled',
+    )
     parser.add_argument('--no-raw-record', dest='raw_record', action='store_false',
                         help='Disable independent raw sensor stream recording')
     parser.set_defaults(raw_record=True)
@@ -539,8 +650,7 @@ if __name__ == '__main__':
         control_mode = ControlMode.from_str(args.control_mode)
         logger_mp.info(f"Robot: {args.robot}, ControlMode: {control_mode.value}, EE: {args.ee}")
         logger_mp.info(f"Initializing robot driver: {args.robot} (sim={args.sim})...")
-        robot = create_robot_driver(
-            args.robot,
+        robot_kwargs = dict(
             control_mode=control_mode,
             frequency=args.frequency,
             simulation_mode=args.sim,
@@ -548,6 +658,13 @@ if __name__ == '__main__':
             ee_type=args.ee,
             verbose=False,
         )
+        if args.robot.upper() == 'TOPSTAR_H1':
+            robot_kwargs['arm_limit_mode'] = (
+                'hard' if args.allow_hard_limit_start else 'modified'
+            )
+        elif args.allow_hard_limit_start:
+            parser.error('--allow-hard-limit-start is only supported by TOPSTAR_H1')
+        robot = create_robot_driver(args.robot, **robot_kwargs)
         logger_mp.info(f"Robot driver ready: {robot.config.model_name}, "
                        f"mode={control_mode.value}, "
                        f"controller={type(robot.controller).__name__}")
@@ -678,6 +795,10 @@ if __name__ == '__main__':
             # episode_XXXX/{colors,depths,data.json}. Conversion to LeRobot is a
             # separate offline step, so recording never depends on video encoding.
             try:
+                if args.no_rerun:
+                    logger_mp.info(
+                        "Live Rerun visualization disabled; camera recording remains enabled"
+                    )
                 image_height, image_width = camera_config['head_camera']['image_shape']
                 episode_writer = EpisodeWriter(
                     task_dir=os.path.join(args.task_dir, args.task_name),
@@ -686,8 +807,13 @@ if __name__ == '__main__':
                     task_steps=args.task_steps,
                     frequency=args.frequency,
                     image_size=[image_width, image_height],
-                    rerun_log=not args.headless,
+                    rerun_log=not (args.headless or args.no_rerun),
                 )
+                if _body_joystick_controller is not None:
+                    episode_writer.info["joint_names"]["body"] = [
+                        "Robot_Body_Movement_Joint",
+                        "Robot_Body_Rotation_Joint",
+                    ]
             except Exception:
                 logger_mp.exception('Failed to initialize Unitree-style episode writer')
 
@@ -952,6 +1078,8 @@ if __name__ == '__main__':
 
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
+        logger_mp.info("📦  Right A: LOCK or UNLOCK rigid dual-arm object mode (relative_head only).")
+        logger_mp.info("🪞  Left A/X: toggle both mirrored arms together in relative_pose mode.")
         if args.record:
             logger_mp.info("🟡  Left Y / [s]: START or SAVE recording.")
             logger_mp.info(
@@ -960,6 +1088,7 @@ if __name__ == '__main__':
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
+        logger_mp.info("🏠  After stopping teleop, release then press Left Grip: HOME.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter TELEOP_ACTIVE state
         last_latency_profile_log = 0.0
@@ -968,6 +1097,59 @@ if __name__ == '__main__':
 
         # 启动时回零一次，后续进入/退出遥操保持当前姿态
         arm_ctrl.go_home()
+        if args.allow_hard_limit_start:
+            # Do not allow a wrist reference to be captured while MoveJ is
+            # still in flight. Rebase both the IK filter and LowCmd state at
+            # the measured HOME pose before accepting the first arm request.
+            if hasattr(arm_ctrl, 'wait_for_hold_expire'):
+                arm_ctrl.wait_for_hold_expire(timeout=10.0)
+            if hasattr(arm_ctrl, 'get_current_dual_arm_state'):
+                current_home_q, current_home_dq, state_receive_ns = (
+                    arm_ctrl.get_current_dual_arm_state()
+                )
+                state_age_s = (
+                    time.monotonic_ns() - int(state_receive_ns or 0)
+                ) / 1_000_000_000.0
+                if state_receive_ns <= 0 or not 0.0 <= state_age_s <= 0.25:
+                    raise RuntimeError(
+                        'Cannot enable hard-limit startup: /lowstate is missing or stale'
+                    )
+                current_home_dq = np.asarray(
+                    current_home_dq, dtype=float
+                ).reshape(-1)
+                if current_home_dq.size < 14 or not np.all(
+                    np.isfinite(current_home_dq[:14])
+                ):
+                    raise RuntimeError(
+                        'Cannot enable hard-limit startup: measured arm velocity is invalid'
+                    )
+                if float(np.max(np.abs(current_home_dq[:14]))) > 0.2:
+                    raise RuntimeError(
+                        'Cannot enable hard-limit startup while an arm is still moving'
+                    )
+            else:
+                current_home_q = arm_ctrl.get_current_dual_arm_q()
+            current_home_q = np.asarray(current_home_q, dtype=float).reshape(-1)
+            if current_home_q.size < 14 or not np.all(np.isfinite(current_home_q[:14])):
+                raise RuntimeError(
+                    'Cannot enable hard-limit startup: measured arm state is invalid'
+                )
+            arm_indices = arm_ik.arm_joint_indices
+            lower = arm_ik.reduced_robot.model.lowerPositionLimit[arm_indices]
+            upper = arm_ik.reduced_robot.model.upperPositionLimit[arm_indices]
+            if np.any(current_home_q[:14] < lower - 0.03) or np.any(
+                current_home_q[:14] > upper + 0.03
+            ):
+                raise RuntimeError(
+                    'Cannot enable hard-limit startup: measured HOME exceeds '
+                    'the H1 mechanical joint envelope'
+                )
+            if hasattr(robot, '_reset_arm_references'):
+                robot._reset_arm_references(current_home_q[:14])
+            logger_mp.info(
+                'Initial HOME completed with mechanical hard-limit IK; '
+                'measured arm state rebased'
+            )
 
         while not STOP: # wait for start or stop signal.
             logger_mp.info("🔵 Waiting for teleop start (press r or left A)...")
@@ -980,33 +1162,7 @@ if __name__ == '__main__':
                     tele_data = tv_wrapper.get_tele_data()
                     _drain_raw_xr_events()
 
-                    # ── Right A: 统一 press 跟踪 + 短按/长按检测 ──
-                    #  短按: release < 3s → arm toggle (relative_pose) / enter teleop (relative_head)
-                    #  长按: hold ≥ 3s    → mode switch
-                    _right_a_short = False
-                    if hasattr(tele_data, 'right_ctrl_aButton') and tele_data.right_ctrl_aButton:
-                        _now = time.time()
-                        if not getattr(tv_wrapper, '_prev_right_ctrl_aButton', False):
-                            _right_a_press_start = _now
-                        elif _now - _right_a_press_start >= 3.0 and not _right_a_long_press_triggered:
-                            _right_a_long_press_triggered = True
-                            # Long press: mode switch
-                            TELEOP_MODE = "relative_pose" if TELEOP_MODE == "relative_head" else "relative_head"
-                            if TELEOP_MODE == "relative_pose":
-                                tv_wrapper.reset_wrist_refs()
-                                LEFT_ARM_ACTIVE = False
-                                RIGHT_ARM_ACTIVE = False
-                                robot.reset_relative_pose_state('both')
-                            logger_mp.info(f"🔄 Right A long press: Teleop mode switched to: {TELEOP_MODE}")
-                        tv_wrapper._prev_right_ctrl_aButton = True
-                    else:
-                        # Released
-                        if getattr(tv_wrapper, '_prev_right_ctrl_aButton', False):
-                            if not _right_a_long_press_triggered and _right_a_press_start > 0:
-                                _right_a_short = True  # Released before 3s → short press
-                        _right_a_press_start = 0.0
-                        _right_a_long_press_triggered = False
-                        tv_wrapper._prev_right_ctrl_aButton = False
+                    right_a_pressed = _consume_right_a_press(tele_data)
 
                     if TELEOP_MODE == "relative_head":
                         # ── relative_head: Left A toggles TELEOP_ACTIVE ──
@@ -1021,32 +1177,30 @@ if __name__ == '__main__':
                             tv_wrapper._prev_left_ctrl_aButton = True
                         else:
                             tv_wrapper._prev_left_ctrl_aButton = False
+                        if right_a_pressed:
+                            logger_mp.warning(
+                                "Start teleop with Left A before using dual-object lock"
+                            )
                     else:  # relative_pose
-                        # ── relative_pose: Left A activates left arm ──
+                        # relative_pose: Left A/X activates both mirrored arms.
                         if hasattr(tele_data, 'left_ctrl_aButton') and tele_data.left_ctrl_aButton:
                             if not getattr(tv_wrapper, '_prev_left_ctrl_aButton', False):
                                 try:
                                     tv_wrapper.capture_left_wrist_ref()
+                                    tv_wrapper.capture_right_wrist_ref()
                                 except Exception:
                                     pass
                                 LEFT_ARM_ACTIVE = True
+                                RIGHT_ARM_ACTIVE = True
                                 TELEOP_ACTIVE = True
-                                robot.reset_relative_pose_state('right')
-                                logger_mp.info("XR Left A/X: Left hand → Right arm activated")
+                                robot.reset_relative_pose_state('both')
+                                logger_mp.info(
+                                    "XR Left A/X: both mirrored arms ACTIVATED "
+                                    "(left hand -> right arm, right hand -> left arm)"
+                                )
                             tv_wrapper._prev_left_ctrl_aButton = True
                         else:
                             tv_wrapper._prev_left_ctrl_aButton = False
-
-                        # ── relative_pose: Right A short press (release < 3s) activates right arm ──
-                        if _right_a_short:
-                            try:
-                                tv_wrapper.capture_right_wrist_ref()
-                            except Exception:
-                                pass
-                            RIGHT_ARM_ACTIVE = True
-                            TELEOP_ACTIVE = True
-                            robot.reset_relative_pose_state('left')
-                            logger_mp.info("XR Right A: Right hand → Left arm activated")
 
                     # Pico left Y mirrors the official s-key dataset toggle.
                     if args.record and hasattr(tele_data, 'left_ctrl_bButton') and tele_data.left_ctrl_bButton:
@@ -1068,6 +1222,7 @@ if __name__ == '__main__':
                         tv_wrapper._prev_right_ctrl_bButton = False
 
                     _process_record_requests()
+                    _process_home_squeeze(tele_data)
 
                     # ── 等待循环中响应 trigger/squeeze ──
                     if hasattr(robot, 'handler_registry') and robot.handler_registry.count > 0:
@@ -1123,35 +1278,7 @@ if __name__ == '__main__':
                 tele_data = tv_wrapper.get_tele_data()
                 _drain_raw_xr_events()
 
-                # ── Right A: 统一 press 跟踪 + 短按/长按检测 ──
-                #  短按: release < 3s → arm toggle (relative_pose)
-                #  长按: hold ≥ 3s    → mode switch
-                _right_a_short = False
-                if hasattr(tele_data, 'right_ctrl_aButton') and tele_data.right_ctrl_aButton:
-                    _now = time.time()
-                    if not getattr(tv_wrapper, '_prev_right_ctrl_aButton', False):
-                        _right_a_press_start = _now
-                    elif _now - _right_a_press_start >= 3.0 and not _right_a_long_press_triggered:
-                        _right_a_long_press_triggered = True
-                        if TELEOP_MODE == "relative_pose":
-                            # Long press: switch back to relative_head
-                            TELEOP_MODE = "relative_head"
-                            LEFT_ARM_ACTIVE = False
-                            RIGHT_ARM_ACTIVE = False
-                            TELEOP_ACTIVE = False
-                            tv_wrapper.reset_wrist_refs()
-                            robot.reset_relative_pose_state('both')
-                            tv_wrapper.reset_init_head_pose()
-                            logger_mp.info("🔄 Right A long press: Switched to relative_head mode")
-                    tv_wrapper._prev_right_ctrl_aButton = True
-                else:
-                    # Released
-                    if getattr(tv_wrapper, '_prev_right_ctrl_aButton', False):
-                        if not _right_a_long_press_triggered and _right_a_press_start > 0:
-                            _right_a_short = True  # Released before 3s → short press
-                    _right_a_press_start = 0.0
-                    _right_a_long_press_triggered = False
-                    tv_wrapper._prev_right_ctrl_aButton = False
+                right_a_pressed = _consume_right_a_press(tele_data)
 
                 if TELEOP_MODE == "relative_head":
                     # ── relative_head: Left A toggles TELEOP_ACTIVE (existing logic) ──
@@ -1163,6 +1290,7 @@ if __name__ == '__main__':
                                     tv_wrapper.reset_init_head_pose()
                                 except Exception:
                                     pass
+                                robot.reset_dual_object_control()
                                 logger_mp.info("XR Left A/X: Exit teleop -> TELEOP_ACTIVE=False (head ref cleared)")
                             else:
                                 try:
@@ -1175,48 +1303,46 @@ if __name__ == '__main__':
                     else:
                         tv_wrapper._prev_left_ctrl_aButton = False
 
-                    # Right A in controller mode: quit teleoperate (existing)
-                    if args.input_mode == "controller" and args.motion:
-                        if tele_data.right_ctrl_aButton and not _right_a_long_press_triggered:
-                            TELEOP_ACTIVE = False
+                    if right_a_pressed:
+                        if robot.request_dual_object_toggle():
+                            logger_mp.info(
+                                "XR Right A: dual-object lock toggle requested"
+                            )
 
                 else:  # TELEOP_MODE == "relative_pose"
-                    # ── relative_pose: Left A toggles LEFT_ARM_ACTIVE ──
+                    # relative_pose: Left A/X toggles both mirrored arms together.
                     if hasattr(tele_data, 'left_ctrl_aButton') and tele_data.left_ctrl_aButton:
                         if not getattr(tv_wrapper, '_prev_left_ctrl_aButton', False):
-                            if LEFT_ARM_ACTIVE:
+                            if LEFT_ARM_ACTIVE or RIGHT_ARM_ACTIVE:
                                 LEFT_ARM_ACTIVE = False
+                                RIGHT_ARM_ACTIVE = False
                                 tv_wrapper.reset_left_wrist_ref()
-                                logger_mp.info("XR Left A/X: Left hand DEACTIVATED")
+                                tv_wrapper.reset_right_wrist_ref()
+                                robot.reset_relative_pose_state('both')
+                                logger_mp.info("XR Left A/X: both mirrored arms DEACTIVATED")
                             else:
                                 try:
                                     tv_wrapper.capture_left_wrist_ref()
+                                    tv_wrapper.capture_right_wrist_ref()
                                 except Exception:
                                     pass
                                 LEFT_ARM_ACTIVE = True
-                                robot.reset_relative_pose_state('right')
-                                logger_mp.info("XR Left A/X: Left hand → Right arm ACTIVATED")
+                                RIGHT_ARM_ACTIVE = True
+                                robot.reset_relative_pose_state('both')
+                                logger_mp.info(
+                                    "XR Left A/X: both mirrored arms ACTIVATED "
+                                    "(left hand -> right arm, right hand -> left arm)"
+                                )
                         tv_wrapper._prev_left_ctrl_aButton = True
                     else:
                         tv_wrapper._prev_left_ctrl_aButton = False
 
-                    # ── relative_pose: Right A short press (release < 3s) toggles RIGHT_ARM_ACTIVE ──
-                    if _right_a_short:
-                        if RIGHT_ARM_ACTIVE:
-                            RIGHT_ARM_ACTIVE = False
-                            tv_wrapper.reset_right_wrist_ref()
-                            logger_mp.info("XR Right A: Right hand DEACTIVATED")
-                        else:
-                            try:
-                                tv_wrapper.capture_right_wrist_ref()
-                            except Exception:
-                                pass
-                            RIGHT_ARM_ACTIVE = True
-                            robot.reset_relative_pose_state('left')
-                            logger_mp.info("XR Right A: Right hand → Left arm ACTIVATED")
-
-                    # ── Derive TELEOP_ACTIVE from arm activation ──
+                    # Both flags move together, so teleop cannot enter a one-arm state.
                     TELEOP_ACTIVE = LEFT_ARM_ACTIVE or RIGHT_ARM_ACTIVE
+
+                if not TELEOP_ACTIVE:
+                    robot.reset_dual_object_control()
+                    break
 
                 # ── Pass teleop_mode to tele_data for RobotDriver ──
                 tele_data.teleop_mode = TELEOP_MODE
@@ -1256,6 +1382,10 @@ if __name__ == '__main__':
                             profile_control_start_ns - pico_timestamp_ns
                         ) / 1e6
                 recording_snapshot = robot.step(tele_data)
+                if _body_joystick_controller is not None:
+                    recording_snapshot.update(
+                        _body_joystick_controller.recording_state(arm_ctrl)
+                    )
                 robot_step_done_timestamp_ns = time.time_ns()
                 robot_step_done_monotonic_ns = time.monotonic_ns()
                 if raw_writer is not None and raw_writer.active:
@@ -1270,6 +1400,7 @@ if __name__ == '__main__':
                             getattr(tele_data, 'controller_pose_wall_ns', 0) or 0
                         ),
                         'timing_ms': dict(robot.last_step_timing_ms),
+                        'dual_object': robot.get_dual_object_status(),
                     })
 
                 if args.latency_profile:
@@ -1564,6 +1695,11 @@ if __name__ == '__main__':
                 time.sleep(sleep_time)
                 logger_mp.debug(f"main process sleep: {sleep_time}")
 
+            # Every teleop session starts from fresh Pico and robot references,
+            # including sessions stopped asynchronously by keyboard or IPC.
+            robot.reset_dual_object_control()
+            _home_left_squeeze_armed = False
+
         # ======== 退出遥操作后的清理 ========
         # 底盘归零
         if MOTION_ACTIVE:
@@ -1602,6 +1738,13 @@ if __name__ == '__main__':
             stop_listening()
         except Exception:
             pass
+
+        try:
+            if _body_joystick_controller is not None and 'arm_ctrl' in locals():
+                _body_joystick_controller.stop_base(arm_ctrl)
+                logger_mp.info("Base velocity reset to zero by body control profile.")
+        except Exception as e:
+            logger_mp.error(f"Failed to reset body control profile: {e}")
 
         # 2. send robot home via ArmRequest
         try:

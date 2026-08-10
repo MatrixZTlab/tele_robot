@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import logging
 import time
 from typing import Any, Optional
 
@@ -10,8 +11,12 @@ from teleop.robot_control._base.control_mode import ControlMode
 from teleop.robot_control._base.robot_config import RobotConfig
 from teleop.robot_control._base.arm_ik import BaseArmIK, IKResult
 from teleop.robot_control._base.arm_controller import BaseArmController
+from teleop.robot_control._base.dual_object_control import DualObjectController
 from teleop.robot_control._base.xr_transformer import XRTransformer, XRProcessedData
 from teleop.robot_control.handler_registry import HandlerRegistry
+
+
+logger = logging.getLogger(__name__)
 
 
 class RobotDriver(ABC):
@@ -34,6 +39,9 @@ class RobotDriver(ABC):
         self.ik: Optional[BaseArmIK] = None
         self.controller: Optional[BaseArmController] = None
         self.xr_transformer: Optional[XRTransformer] = None
+        self._dual_object_control: Optional[DualObjectController] = None
+        self._dual_object_toggle_requested = False
+        self._dual_object_last_warning_s = 0.0
         self.handler_registry = HandlerRegistry()
 
         # 相对位姿模式：激活瞬间的 EE 位姿（冻结基准，防漂移）
@@ -118,6 +126,9 @@ class RobotDriver(ABC):
         if teleop_mode == "relative_head":
             # ── 现有管线 ──
             xr = self.xr_transformer.transform(tele_data, self.control_mode.value)
+            xr = self._apply_dual_object_control(
+                xr, current_q, current_dq, state_receive_ns, teleop_mode
+            )
             transform_done = time.perf_counter_ns()
             ik_result = self.ik.solve_ik(
                 xr.left_wrist_pose, xr.right_wrist_pose,
@@ -139,6 +150,7 @@ class RobotDriver(ABC):
                     tele_data.left_wrist_pose, l_ref,
                     self._init_right_ee,
                     arm_scale=self.arm_scale,
+                    translation_axis_sign=(1.0, -1.0, 1.0),
                 )
             else:
                 right_target = right_ee
@@ -155,6 +167,7 @@ class RobotDriver(ABC):
                     tele_data.right_wrist_pose, r_ref,
                     self._init_left_ee,
                     arm_scale=self.arm_scale,
+                    translation_axis_sign=(1.0, -1.0, 1.0),
                 )
             else:
                 left_target = left_ee
@@ -198,6 +211,7 @@ class RobotDriver(ABC):
 
         # ⑦ 录制快照
         snapshot = self._collect_recording_state(ik_result, current_q)
+        snapshot.setdefault("dual_object", self.get_dual_object_status())
         collect_done = time.perf_counter_ns()
         self.last_step_timing_ms = {
             "state": (state_done - step_start) / 1e6,
@@ -211,6 +225,171 @@ class RobotDriver(ABC):
             "state_receive_monotonic": int(state_receive_ns or 0),
         }
         return snapshot
+
+    @property
+    def dual_object_locked(self) -> bool:
+        return bool(
+            self._dual_object_control is not None
+            and self._dual_object_control.locked
+        )
+
+    def request_dual_object_toggle(self) -> bool:
+        """Request a lock/unlock transition in the next synchronized step."""
+        if self._dual_object_control is None:
+            logger.warning("Dual-object control is not available for this robot")
+            return False
+        self._dual_object_toggle_requested = True
+        return True
+
+    def reset_dual_object_control(self) -> None:
+        """Clear lock and unlock references when a teleop session ends."""
+        self._dual_object_toggle_requested = False
+        if self._dual_object_control is not None:
+            self._dual_object_control.reset()
+
+    def get_dual_object_status(self) -> dict[str, object]:
+        if self._dual_object_control is None:
+            return {
+                "available": False,
+                "locked": False,
+                "lock_width_m": None,
+                "rotation_disagreement_rad": 0.0,
+                "rotation_suspended": False,
+                "workspace_limited": False,
+            }
+        return {
+            "available": True,
+            **self._dual_object_control.status(),
+        }
+
+    def _apply_dual_object_control(
+        self,
+        xr: XRProcessedData,
+        current_q: np.ndarray,
+        current_dq: np.ndarray,
+        state_receive_ns: int,
+        teleop_mode: str,
+    ) -> XRProcessedData:
+        object_control = self._dual_object_control
+        if object_control is None:
+            return xr
+
+        now_s = time.monotonic()
+        if self._dual_object_toggle_requested:
+            self._dual_object_toggle_requested = False
+            if teleop_mode != "relative_head":
+                logger.warning("Dual-object lock requires relative_head mode")
+            else:
+                actual_poses = self._validate_dual_object_transition(
+                    current_q, current_dq, state_receive_ns
+                )
+                if actual_poses is not None:
+                    actual_left, actual_right = actual_poses
+                    if object_control.locked:
+                        object_control.unlock(
+                            xr.left_wrist_pose,
+                            xr.right_wrist_pose,
+                            actual_left,
+                            actual_right,
+                        )
+                        self._reset_arm_references(current_q)
+                        logger.warning(
+                            "DUAL-OBJECT UNLOCKED: independent arm references recaptured"
+                        )
+                    else:
+                        width_m = object_control.lock(
+                            xr.left_wrist_pose,
+                            xr.right_wrist_pose,
+                            actual_left,
+                            actual_right,
+                            now_s=now_s,
+                        )
+                        self._reset_arm_references(current_q)
+                        logger.warning(
+                            "DUAL-OBJECT LOCKED: measured grasp width %.3f m",
+                            width_m,
+                        )
+
+        left_target, right_target = object_control.targets(
+            xr.left_wrist_pose,
+            xr.right_wrist_pose,
+            now_s=now_s,
+            validator=self._dual_object_targets_valid,
+        )
+        if object_control.last_workspace_limited:
+            if now_s - self._dual_object_last_warning_s >= 1.0:
+                self._dual_object_last_warning_s = now_s
+                logger.warning(
+                    "DUAL-OBJECT workspace limit reached; holding last valid target"
+                )
+        xr.left_wrist_pose = left_target
+        xr.right_wrist_pose = right_target
+        return xr
+
+    def _validate_dual_object_transition(
+        self,
+        current_q: np.ndarray,
+        current_dq: np.ndarray,
+        state_receive_ns: int,
+    ) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        q = np.asarray(current_q, dtype=float).reshape(-1)
+        dq = np.asarray(current_dq, dtype=float).reshape(-1)
+        if q.size < 14 or dq.size < 14:
+            logger.error("Dual-object toggle rejected: incomplete arm state")
+            return None
+        if not np.all(np.isfinite(q[:14])) or not np.all(np.isfinite(dq[:14])):
+            logger.error("Dual-object toggle rejected: non-finite arm state")
+            return None
+        if not self.simulation_mode:
+            if state_receive_ns <= 0:
+                logger.error("Dual-object toggle rejected: LowState is unavailable")
+                return None
+            state_age_s = (time.monotonic_ns() - state_receive_ns) / 1e9
+            if state_age_s < -0.01 or state_age_s > 0.10:
+                logger.error(
+                    "Dual-object toggle rejected: LowState age %.1f ms exceeds 100 ms",
+                    state_age_s * 1000.0,
+                )
+                return None
+        max_joint_speed = float(np.max(np.abs(dq[:14])))
+        if max_joint_speed > 0.75:
+            logger.error(
+                "Dual-object toggle rejected: max joint speed %.3f rad/s exceeds 0.750 rad/s",
+                max_joint_speed,
+            )
+            return None
+        try:
+            actual_left, actual_right = self._get_current_ee_poses(q[:14])
+        except Exception:
+            logger.exception("Dual-object toggle rejected: FK evaluation failed")
+            return None
+        width_m = float(np.linalg.norm(
+            actual_right[:3, 3] - actual_left[:3, 3]
+        ))
+        if not 0.10 <= width_m <= 1.50:
+            logger.error(
+                "Dual-object toggle rejected: implausible measured width %.3f m",
+                width_m,
+            )
+            return None
+        return actual_left, actual_right
+
+    def _reset_arm_references(self, current_q: np.ndarray) -> None:
+        if self.ik is not None and hasattr(self.ik, "reset_smoothing"):
+            self.ik.reset_smoothing(current_q)
+        if (
+            self.controller is not None
+            and hasattr(self.controller, "reset_arm_command_reference")
+        ):
+            self.controller.reset_arm_command_reference(current_q)
+
+    def _dual_object_targets_valid(
+        self,
+        left_target: np.ndarray,
+        right_target: np.ndarray,
+    ) -> bool:
+        """Robot-specific workspace hook for a rigid target pair."""
+        return True
 
     def reset_relative_pose_state(self, side: str = 'both') -> None:
         """当外层激活臂或切换模式时调用，强制清除 _init_ee 以便 step() 重新捕获 FK 基准。

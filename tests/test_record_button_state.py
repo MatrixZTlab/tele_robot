@@ -34,6 +34,33 @@ class FakeRawWriter:
         return f"raw/episode_{episode_index:04d}"
 
 
+class FakeHomeRobot:
+    def __init__(self):
+        self.reset_count = 0
+        self.home_count = 0
+        self.reference_values = []
+
+    def reset_dual_object_control(self):
+        self.reset_count += 1
+
+    def go_home(self):
+        self.home_count += 1
+
+    def _reset_arm_references(self, value):
+        self.reference_values.append(list(value))
+
+
+class FakeHomeArmController:
+    def __init__(self):
+        self.wait_timeouts = []
+
+    def wait_for_hold_expire(self, timeout):
+        self.wait_timeouts.append(timeout)
+
+    def get_current_dual_arm_q(self):
+        return [0.1] * 14
+
+
 def _configure_state(monkeypatch, writer, raw_writer):
     args = SimpleNamespace(
         record=True,
@@ -54,6 +81,56 @@ def _configure_state(monkeypatch, writer, raw_writer):
     monkeypatch.setattr(teleop_main, "RECORD_TOGGLE", False)
     monkeypatch.setattr(teleop_main, "RECORD_DISCARD", False)
     monkeypatch.setattr(teleop_main, "LAST_RECORD_EPISODE_ID", None)
+
+
+def test_right_a_is_one_toggle_per_press(monkeypatch):
+    wrapper = SimpleNamespace()
+    monkeypatch.setattr(teleop_main, "tv_wrapper", wrapper, raising=False)
+    released = SimpleNamespace(right_ctrl_aButton=False)
+    pressed = SimpleNamespace(right_ctrl_aButton=True)
+
+    assert teleop_main._consume_right_a_press(released) is False
+    assert teleop_main._consume_right_a_press(pressed) is True
+    assert teleop_main._consume_right_a_press(pressed) is False
+    assert teleop_main._consume_right_a_press(released) is False
+    assert teleop_main._consume_right_a_press(pressed) is True
+
+
+def test_left_squeeze_returns_home_once_after_release(monkeypatch):
+    robot = FakeHomeRobot()
+    arm = FakeHomeArmController()
+    monkeypatch.setattr(teleop_main, "robot", robot, raising=False)
+    monkeypatch.setattr(teleop_main, "arm_ctrl", arm, raising=False)
+    monkeypatch.setattr(teleop_main, "TELEOP_ACTIVE", False)
+    monkeypatch.setattr(teleop_main, "RECORD_RUNNING", False)
+    monkeypatch.setattr(teleop_main, "_home_left_squeeze_armed", False)
+
+    released = SimpleNamespace(left_ctrl_squeeze=False, left_ctrl_squeezeValue=0.0)
+    pressed = SimpleNamespace(left_ctrl_squeeze=True, left_ctrl_squeezeValue=1.0)
+
+    assert teleop_main._process_home_squeeze(pressed) is False
+    assert teleop_main._process_home_squeeze(released) is False
+    assert teleop_main._process_home_squeeze(pressed) is True
+    assert teleop_main._process_home_squeeze(pressed) is False
+
+    assert robot.reset_count == 1
+    assert robot.home_count == 1
+    assert robot.reference_values == [[0.1] * 14]
+    assert arm.wait_timeouts == [5.0]
+
+
+def test_left_squeeze_home_is_rejected_while_recording(monkeypatch):
+    robot = FakeHomeRobot()
+    arm = FakeHomeArmController()
+    monkeypatch.setattr(teleop_main, "robot", robot, raising=False)
+    monkeypatch.setattr(teleop_main, "arm_ctrl", arm, raising=False)
+    monkeypatch.setattr(teleop_main, "TELEOP_ACTIVE", False)
+    monkeypatch.setattr(teleop_main, "RECORD_RUNNING", True)
+    monkeypatch.setattr(teleop_main, "_home_left_squeeze_armed", True)
+
+    pressed = SimpleNamespace(left_ctrl_squeeze=True, left_ctrl_squeezeValue=1.0)
+    assert teleop_main._process_home_squeeze(pressed) is False
+    assert robot.home_count == 0
 
 
 def test_discard_cannot_remove_episode_from_previous_process(monkeypatch, tmp_path):

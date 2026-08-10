@@ -488,7 +488,7 @@ def align_episode(args: argparse.Namespace) -> Path:
         if action is None or len(action) < 14:
             invalidate(reasons, "lowcmd:invalid")
             continue
-        ee_right_left = command.get("ee_command_right_left", [0.0, 0.0])
+        ee_right_left = command.get("ee_command_right_left") or []
         right_ee = [float(ee_right_left[0])] if len(ee_right_left) > 0 else []
         left_ee = [float(ee_right_left[1])] if len(ee_right_left) > 1 else []
 
@@ -524,8 +524,8 @@ def align_episode(args: argparse.Namespace) -> Path:
             "colors": colors,
             "depths": depths,
             "states": {
-                "left_arm": {"qpos": q[:7], "qvel": dq[:7], "torque": []},
-                "right_arm": {"qpos": q[7:14], "qvel": dq[7:14], "torque": []},
+                "left_arm": {"qpos": q[:7], "qvel": [], "torque": []},
+                "right_arm": {"qpos": q[7:14], "qvel": [], "torque": []},
                 "left_ee": {"qpos": left_ee, "qvel": [], "torque": []},
                 "right_ee": {"qpos": right_ee, "qvel": [], "torque": []},
                 "body": {"qpos": []},

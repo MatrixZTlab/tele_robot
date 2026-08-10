@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from teleop.utils.rerun_visualizer import RerunEpisodeReader
+from teleop.utils.rerun_visualizer import RerunEpisodeReader, RerunLogger
 
 
 def test_episode_reader_resolves_images_and_keeps_alignment(tmp_path):
@@ -31,3 +31,44 @@ def test_episode_reader_resolves_images_and_keeps_alignment(tmp_path):
     assert frame["states"]["left_arm"]["qpos"] == [0.1]
     assert frame["actions"]["left_arm"]["qpos"] == [0.2]
     assert frame["alignment"]["lowstate_gap_ms"] == 20.0
+
+
+def test_online_logger_resolves_episode_relative_image_path(monkeypatch, tmp_path):
+    episode_dir = tmp_path / "episode_0001"
+    image_path = episode_dir / "colors" / "000000_color_0.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"jpeg")
+    encoded_paths = []
+
+    monkeypatch.setattr(
+        "teleop.utils.rerun_visualizer.rr.set_time",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "teleop.utils.rerun_visualizer.rr.EncodedImage",
+        lambda *, path: encoded_paths.append(Path(path)) or path,
+    )
+    monkeypatch.setattr(
+        "teleop.utils.rerun_visualizer.rr.Scalars",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        "teleop.utils.rerun_visualizer.rr.log",
+        lambda *_args, **_kwargs: None,
+    )
+
+    logger = object.__new__(RerunLogger)
+    logger.prefix = "online/"
+    logger.log_item_data(
+        {
+            "idx": 0,
+            "colors": {"color_0": "colors/000000_color_0.jpg"},
+            "states": {},
+            "actions": {},
+            "depths": {},
+            "alignment": {},
+        },
+        base_dir=episode_dir,
+    )
+
+    assert encoded_paths == [image_path.resolve()]

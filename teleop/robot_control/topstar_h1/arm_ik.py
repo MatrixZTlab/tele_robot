@@ -24,7 +24,12 @@ class H1ArmIK(BaseArmIK):
                  visualization="off", verbose=False):
         # 缓存路径用本文件同级目录
         self._self_dir = os.path.dirname(os.path.abspath(__file__))
-        config.cache_filename = os.path.join(self._self_dir, "topstar_h1_model_cache.pkl")
+        cache_name = (
+            "topstar_h1_model_hard_limits_cache.pkl"
+            if config.limit_mode == "hard"
+            else "topstar_h1_model_cache.pkl"
+        )
+        config.cache_filename = os.path.join(self._self_dir, cache_name)
 
         super().__init__(config, control_mode, visualization, verbose)
 
@@ -58,12 +63,16 @@ class H1ArmIK(BaseArmIK):
 
     def _setup_limits(self):
         if self.config.limit_mode == "modified":
-            self._apply_joint_specs_limits()
+            self._apply_joint_specs_limits(safety_deg=5.0)
+        elif self.config.limit_mode == "hard":
+            self._apply_joint_specs_limits(safety_deg=0.0)
 
-    def _apply_joint_specs_limits(self):
-        """覆盖 URDF 限位，使用 JOINT_SPECS 硬件限位 + 5° 安全裕度。"""
-        SAFETY_DEG = 5.0
-        margin = np.deg2rad(SAFETY_DEG)
+    def _apply_joint_specs_limits(self, safety_deg=5.0):
+        """Apply H1 hardware limits with an optional symmetric safety margin."""
+        safety_deg = float(safety_deg)
+        if not np.isfinite(safety_deg) or safety_deg < 0.0:
+            raise ValueError("safety_deg must be finite and non-negative")
+        margin = np.deg2rad(safety_deg)
 
         _HW_SPECS = [
             (-2.61799388,  2.61799388),   # sim[0]  L Shoulder Base

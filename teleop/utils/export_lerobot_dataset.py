@@ -47,6 +47,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerance-s", type=float, default=None, help="Override LeRobot timestamp tolerance.")
     parser.add_argument("--no-depth", action="store_true", help="Skip depth streams.")
     parser.add_argument("--no-videos", action="store_true", help="Store image features as images instead of videos.")
+    parser.add_argument(
+        "--streaming-encoding",
+        action="store_true",
+        help="Encode video frames directly instead of staging temporary PNG files.",
+    )
+    parser.add_argument(
+        "--vcodec",
+        default="libsvtav1",
+        help="LeRobot video codec, for example libsvtav1, h264, or h264_nvenc.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Delete output directory before exporting.")
     parser.add_argument(
         "--allow-invalid-alignment",
@@ -285,6 +295,8 @@ def write_dataset(args: argparse.Namespace) -> Path:
         robot_type=args.robot_type,
         use_videos=not args.no_videos,
         tolerance_s=tolerance_s,
+        streaming_encoding=args.streaming_encoding,
+        vcodec=args.vcodec,
     )
 
     alignment_records: list[dict[str, Any]] = []
@@ -328,6 +340,8 @@ def write_dataset(args: argparse.Namespace) -> Path:
         "action_dim": len(action_names),
         "color_keys": color_keys,
         "depth_keys": depth_keys,
+        "streaming_encoding": args.streaming_encoding,
+        "vcodec": args.vcodec,
         "depth_note": (
             "Depth PNGs are exported as 3-channel uint8 video frames because "
             "LeRobot 0.4.1 image writing expects 3-channel images. Raw depth stays "

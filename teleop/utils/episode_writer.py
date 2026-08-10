@@ -135,9 +135,6 @@ class EpisodeWriter():
             f.write('"data": [\n')
         self.first_item = True   # Flag to handle commas in JSON array
 
-        if self.rerun_log:
-            self.online_logger = RerunLogger(prefix="online/", IdxRangeBoundary = 60, memory_limit="300MB")
-
         self.is_available = False  # After the episode is created, the class is marked as unavailable until the episode is successfully saved
         logger_mp.info(f"==> New episode created: {self.episode_dir}")
         return True  # Return True if the episode is successfully created
@@ -241,9 +238,17 @@ class EpisodeWriter():
 
         # Log data if necessary
         if self.rerun_log:
-            curent_record_time = time.time()
-            logger_mp.info(f"==> episode_id:{self.episode_id}  item_id:{idx}  current_time:{curent_record_time}")
-            self.rerun_logger.log_item_data(item_data)
+            progress_interval = max(1, int(round(self.frequency * 5.0)))
+            if idx == 0 or idx % progress_interval == 0:
+                current_record_time = time.time()
+                logger_mp.info(
+                    f"==> episode_id:{self.episode_id} item_id:{idx} "
+                    f"current_time:{current_record_time}"
+                )
+            self.rerun_logger.log_item_data(
+                item_data,
+                base_dir=self.episode_dir,
+            )
 
     def save_episode(self):
         """

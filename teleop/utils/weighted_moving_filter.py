@@ -38,6 +38,20 @@ class WeightedMovingFilter:
     def filtered_data(self):
         return self._filtered_data
 
+    def reset(self, initial_data=None):
+        """Clear queued samples and optionally seed the current output."""
+        self._data_queue = []
+        if initial_data is None:
+            self._filtered_data = np.zeros(self._data_size)
+            return
+        value = np.asarray(initial_data, dtype=float).reshape(-1)
+        if value.size != self._data_size:
+            raise ValueError(
+                f"initial_data has {value.size} values, expected {self._data_size}"
+            )
+        self._filtered_data = value.copy()
+        self._data_queue.append(value.copy())
+
 
 def visualize_filter_comparison(filter_params, steps):
     import time

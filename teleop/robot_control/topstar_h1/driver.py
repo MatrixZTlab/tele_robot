@@ -4,6 +4,7 @@ import numpy as np
 
 from teleop.robot_control._base.robot_driver import RobotDriver, IKResult
 from teleop.robot_control._base.control_mode import ControlMode
+from teleop.robot_control._base.dual_object_control import DualObjectController
 from teleop.robot_control.topstar_h1.config import H1RobotConfig
 from teleop.robot_control.topstar_h1.arm_ik import H1ArmIK
 from teleop.robot_control.topstar_h1.xr_transformer import H1XRTransformer
@@ -18,11 +19,16 @@ class H1RobotDriver(RobotDriver):
 
     def __init__(self, control_mode=ControlMode.ARMS_HEAD,
                  frequency=50.0, simulation_mode=True, arm_scale=1.0,
-                 ee_type=None, verbose=False):
+                 ee_type=None, verbose=False,
+                 arm_limit_mode="modified"):
         # ⚠️ 必须在 super().__init__() 前赋值（父类构造会调用 _build_components）
+        if arm_limit_mode not in ("modified", "hard"):
+            raise ValueError(
+                "arm_limit_mode must be 'modified' (5-degree margin) or 'hard'"
+            )
         self.ee_type = ee_type
         self.arm_scale = arm_scale
-        config = H1RobotConfig()
+        config = H1RobotConfig(limit_mode=arm_limit_mode)
         self.max_reach = config.arm_max_reach
         self.l_shoulder = None
         self.r_shoulder = None
@@ -53,15 +59,30 @@ class H1RobotDriver(RobotDriver):
         self.xr_transformer = H1XRTransformer(
             self.ik, self.arm_scale, self.max_reach,
         )
+        self._dual_object_control = DualObjectController(
+            max_translation_speed_m_s=None,
+            max_rotation_speed_rad_s=None,
+            max_rotation_disagreement_rad=np.deg2rad(25.0),
+        )
         self.l_shoulder = self.xr_transformer.l_shoulder
         self.r_shoulder = self.xr_transformer.r_shoulder
         logger.info("XR transformer ready")
 
         # EE handler
         if self.ee_type == "suction_cup":
+            self.controller.enable_ee_gripper()
             handler = SuctionCupHandler(arm_ctrl=self.controller)
             self.handler_registry.register(handler)
             logger.info(f"EE handler registered: {self.ee_type}")
+        elif self.ee_type == "fixed_gripper":
+            self.controller.disable_ee_gripper()
+            logger.info("Fixed gripper selected: no active EE command will be sent")
+
+    def _dual_object_targets_valid(self, left_target, right_target):
+        reach_limit = self.max_reach + 0.02
+        left_reach = np.linalg.norm(left_target[:3, 3] - self.l_shoulder)
+        right_reach = np.linalg.norm(right_target[:3, 3] - self.r_shoulder)
+        return bool(left_reach <= reach_limit and right_reach <= reach_limit)
 
     # ── 命令分发 ────────────────────────────────────────────
 

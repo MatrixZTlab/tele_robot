@@ -197,7 +197,22 @@ class RerunLogger:
             collapse_panels=False,
         )
 
-    def log_item_data(self, item_data: dict[str, Any]) -> None:
+    @staticmethod
+    def _resolve_log_path(
+        value: str | Path,
+        base_dir: str | Path | None,
+    ) -> Path:
+        path = Path(value).expanduser()
+        if not path.is_absolute() and base_dir is not None:
+            path = Path(base_dir).expanduser() / path
+        return path.resolve()
+
+    def log_item_data(
+        self,
+        item_data: dict[str, Any],
+        *,
+        base_dir: str | Path | None = None,
+    ) -> None:
         rr.set_time("idx", sequence=int(item_data.get("idx", 0)))
         timestamp = item_data.get("timestamp")
         if timestamp is not None:
@@ -224,11 +239,16 @@ class RerunLogger:
         for color_key, color in (item_data.get("colors", {}) or {}).items():
             entity = f"{self.prefix}colors/{color_key}"
             if isinstance(color, (str, Path)):
-                rr.log(entity, rr.EncodedImage(path=color))
+                path = self._resolve_log_path(color, base_dir)
+                if path.is_file():
+                    rr.log(entity, rr.EncodedImage(path=path))
             elif color is not None:
                 rr.log(entity, rr.Image(color))
 
         for depth_key, depth in (item_data.get("depths", {}) or {}).items():
+            if isinstance(depth, (str, Path)):
+                path = self._resolve_log_path(depth, base_dir)
+                depth = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
             if depth is not None:
                 rr.log(f"{self.prefix}depths/{depth_key}", rr.DepthImage(depth))
 

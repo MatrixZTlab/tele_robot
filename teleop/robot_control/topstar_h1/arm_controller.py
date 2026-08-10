@@ -37,7 +37,7 @@ class H1ArmController(BaseArmController):
         self.head_dq_limit = 15.0
         self.head_smooth_alpha = 0.8
         self.home_head_q = np.array([0.0, np.deg2rad(-19.0)], dtype=float)
-
+        #self.home_head_q = np.array([0.0, np.deg2rad(0.0)], dtype=float)
         self.joint_sign_map = np.ones(14, dtype=float)
         if not self.simulation_mode:
             self.joint_sign_map[3] = -1.0
@@ -62,7 +62,7 @@ class H1ArmController(BaseArmController):
         self.last_published_head_q = np.zeros(2)
         self.torso_target = np.zeros(2)   # [torso_lift, torso_pitch] (hw convention)
         self.last_published_torso = np.zeros(2)
-        self._ee_gripper_state = [0.0, 0.0]
+        self._ee_gripper_state = []
         self._raw_event_sink = None
 
         # ROS2
@@ -121,24 +121,56 @@ class H1ArmController(BaseArmController):
         self._raw_event_sink = sink
         self._ros_node.set_state_event_sink(self._emit_lowstate_event if sink else None)
 
+    def disable_ee_gripper(self) -> None:
+        """Mark the robot as having no actively commanded EE degrees of freedom."""
+        with self.publish_lock:
+            self._ee_gripper_state = []
+
+    def enable_ee_gripper(self) -> None:
+        """Enable the two actively commanded suction-cup state values."""
+        with self.publish_lock:
+            self._ee_gripper_state = [0.0, 0.0]
+
     def _emit_lowstate_event(self, msg, timing) -> None:
         if self._raw_event_sink is None:
             return
+        arm_states = (
+            [msg.motor_state[index] for index in self.left_slots]
+            + [msg.motor_state[index] for index in self.right_slots]
+        )
         q_hw = np.asarray(
-            [msg.motor_state[index].q for index in self.left_slots]
-            + [msg.motor_state[index].q for index in self.right_slots],
+            [state.q for state in arm_states],
             dtype=float,
         )
         dq_hw = np.asarray(
-            [msg.motor_state[index].dq for index in self.left_slots]
-            + [msg.motor_state[index].dq for index in self.right_slots],
+            [state.dq for state in arm_states],
             dtype=float,
         )
+        tau_est_hw = np.asarray(
+            [getattr(state, 'tau_est', 0.0) for state in arm_states],
+            dtype=float,
+        )
+        q = self._hw_to_sim_arm(q_hw)
+        dq = self._hw_to_sim_arm(dq_hw)
+        tau_est = self._hw_to_sim_arm(tau_est_hw)
+        with self.publish_lock:
+            q_commanded = self.last_published_q.copy()
         self._raw_event_sink('lowstate', {
             **timing,
             'clock_domain': 'robot_source_or_ros_host_receive',
-            'q': self._hw_to_sim_arm(q_hw).tolist(),
-            'dq': self._hw_to_sim_arm(dq_hw).tolist(),
+            'q': q.tolist(),
+            'dq': dq.tolist(),
+            'tau_est': tau_est.tolist(),
+            'q_commanded': q_commanded.tolist(),
+            'q_tracking_error': (q_commanded - q).tolist(),
+            'temperature': [
+                [int(value) for value in getattr(state, 'temperature', [])]
+                for state in arm_states
+            ],
+            'motorstate': [
+                int(getattr(state, 'motorstate', 0)) for state in arm_states
+            ],
+            'motor_mode': [int(getattr(state, 'mode', 0)) for state in arm_states],
         })
 
     def get_current_dual_arm_q(self):
@@ -210,6 +242,8 @@ class H1ArmController(BaseArmController):
         command_monotonic_ns = time.monotonic_ns()
         command_wall_ns = time.time_ns()
         with self.publish_lock:
+            if len(self._ee_gripper_state) != 2:
+                raise RuntimeError("Active EE command is disabled for this robot")
             self._ee_gripper_state[arm_idx] = float(value)
             ee_state = list(self._ee_gripper_state)
         self._ros_node.publish_gripper_cmd(arm_idx, float(value))
@@ -267,11 +301,33 @@ class H1ArmController(BaseArmController):
             self.last_published_torso = self.torso_target.copy()
         self.publish_event.set()
 
-    def go_home(self, timeout=10.0):
+    # def go_home(self, timeout=10.0):
+    #     self.move_joints_timed([
+    #         -1.6, -1.55, 0, 0, 0, 0, 0,
+    #         1.6, -1.571, 0, 0, 0, 0, 0
+    #     ], duration=3.0, head_q=self.home_head_q)
+
+
+ ################################################################################ VLA
+    def _legacy_go_home(self, timeout=10.0):
         self.move_joints_timed([
-            -1.6, -1.55, 0, 0, 0, 0, 0,
-            1.6, -1.571, 0, 0, 0, 0, 0
-        ], duration=3.0, head_q=self.home_head_q)
+            # 左臂 7 个关节
+            -1.496550020, -0.761539513, 0.203383218, 1.487247416,
+            -2.828934371, 0.727837205, 2.789105958,
+
+            # 右臂 7 个关节
+            1.496550020, -0.761539513, -0.203383218, -1.487247416,
+            2.828934371, -0.727837205, -2.789105958,
+        ], duration=5.0, head_q=self.home_head_q)
+
+    def go_home(self, timeout=10.0):
+        """Move both arms to the operator-provided X-View home pose (radians)."""
+        self.move_joints_timed([
+            -1.496550020, -0.761539513, 0.203383218, 1.487247416,
+            -2.828934371, 0.727837205, 2.789105958,
+            1.496550020, -0.761539513, -0.203383218, -1.487247416,
+            2.828934371, -0.727837205, -2.789105958,
+        ], duration=5.0, head_q=self.home_head_q)
 
     def wait_for_hold_expire(self, timeout=10.0):
         deadline = time.monotonic() + timeout
@@ -293,6 +349,22 @@ class H1ArmController(BaseArmController):
     def get_last_published_dual_arm_q(self):
         with self.publish_lock:
             return self.last_published_q.copy()
+
+    def reset_arm_command_reference(self, current_q):
+        """Drop queued position error when the teleop reference frame changes."""
+        value = np.asarray(current_q, dtype=float).reshape(-1)
+        if value.size < 14 or not np.all(np.isfinite(value[:14])):
+            raise ValueError("current_q must contain 14 finite arm joint values")
+        now_monotonic_ns = time.monotonic_ns()
+        now_wall_ns = time.time_ns()
+        with self.publish_lock:
+            self.q_target = value[:14].copy()
+            self.tauff_target = np.zeros(14, dtype=float)
+            self.last_published_q = value[:14].copy()
+            self.last_target_update_ns = now_monotonic_ns
+            self.last_target_update_wall_ns = now_wall_ns
+            self._target_sequence += 1
+        self.publish_event.set()
 
     def get_head_q(self):
         state = self._ros_node.state_buffer.get()
@@ -400,13 +472,9 @@ class H1ArmController(BaseArmController):
                 q_clipped = self._clip_arm_q_target(q_tgt, cur_q, self.dq_limit)
                 q_hw = self._sim_to_hw_arm(q_clipped)
                 tau_hw = self._sim_to_hw_arm(tau_tgt)
-                with self.publish_lock:
-                    self.last_published_q = q_clipped.copy()
 
                 # 头部限速 + 坐标转换
                 head_clipped = self._clip_head_q_target(head_tgt, cur_head, self.head_dq_limit)
-                with self.publish_lock:
-                    self.last_published_head_q = head_clipped.copy()
                 head_hw = self._head_ik_to_hw(head_clipped)
 
                 # 构建 LowCmd
@@ -430,8 +498,6 @@ class H1ArmController(BaseArmController):
 
                 # 填充躯干 (slots 0, 1) — 直接写入 hw 值
                 torso_clipped = self._clip_torso_target(torso_tgt, cur_torso, 1.0)
-                with self.publish_lock:
-                    self.last_published_torso = torso_clipped.copy()
                 msg.motor_cmd[0].q = float(torso_clipped[0])  # TORSO_LIFT
                 msg.motor_cmd[1].q = float(torso_clipped[1])  # TORSO_PITCH
 
@@ -455,11 +521,20 @@ class H1ArmController(BaseArmController):
                 #     )
 
                 self._ros_node.compute_lowcmd_crc(msg)
-                self._ros_node.cmd_pub.publish(msg)
-                self._last_publish_time = time.time()
-                publish_wall_ns = time.time_ns()
+
+                # A reference reset may arrive while this message is being built.
+                # Keep sequence validation, publish, and the published reference
+                # update atomic so a stale cycle cannot overwrite a new reference.
                 with self.publish_lock:
+                    if target_sequence != self._target_sequence:
+                        continue
+                    self._ros_node.cmd_pub.publish(msg)
                     publish_ns = time.monotonic_ns()
+                    publish_wall_ns = time.time_ns()
+                    self._last_publish_time = time.time()
+                    self.last_published_q = q_clipped.copy()
+                    self.last_published_head_q = head_clipped.copy()
+                    self.last_published_torso = torso_clipped.copy()
                     self.last_lowcmd_publish_ns = publish_ns
                     self.last_target_to_lowcmd_ms = (
                         (publish_ns - target_update_ns) / 1e6

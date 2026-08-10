@@ -6,6 +6,10 @@ from unittest import mock
 import numpy as np
 
 from teleop.robot_control.vr_mujoco_relative_teleop import (
+    H1_HARD_ARM_LOWER,
+    H1_HARD_ARM_UPPER,
+    H1_SAFE_ARM_LOWER,
+    H1_SAFE_ARM_UPPER,
     H1_LEFT_ARM_JOINT_NAMES,
     H1_RIGHT_ARM_JOINT_NAMES,
     H1_XR_TO_ROBOT_ROTATION,
@@ -61,6 +65,32 @@ class VRRelativePoseTrackerTest(unittest.TestCase):
 
         expected = self.ee0[:3, 3] + 2.0 * (self.basis @ wrist[:3, 3])
         np.testing.assert_allclose(target[:3, 3], expected)
+
+    def test_translation_axis_sign_flips_only_robot_lateral_axis(self):
+        tracker = VRRelativePoseTracker(
+            self.ee0,
+            self.basis,
+            position_scale=1.0,
+            ema_alpha=1.0,
+            translation_axis_sign=(1.0, -1.0, 1.0),
+        )
+        tracker.update(np.eye(4))
+        wrist = np.eye(4)
+        wrist[:3, 3] = [0.1, 0.2, 0.3]
+
+        target = tracker.update(wrist)
+
+        ordinary = self.basis @ wrist[:3, 3]
+        expected = ordinary * np.array([1.0, -1.0, 1.0])
+        np.testing.assert_allclose(target[:3, 3], self.ee0[:3, 3] + expected)
+        self.assertAlmostEqual(target[0, 3] - self.ee0[0, 3], ordinary[0])
+        self.assertAlmostEqual(target[2, 3] - self.ee0[2, 3], ordinary[2])
+
+    def test_translation_axis_sign_rejects_non_mirror_values(self):
+        with self.assertRaisesRegex(ValueError, "translation_axis_sign"):
+            VRRelativePoseTracker(
+                self.ee0, self.basis, translation_axis_sign=(1.0, 0.0, 1.0)
+            )
 
     def test_translation_ema_blends_later_residuals(self):
         tracker = VRRelativePoseTracker(
@@ -374,6 +404,31 @@ class LMMathTest(unittest.TestCase):
 
 
 class H1MuJoCoLMIKTest(unittest.TestCase):
+    def test_h1_asset_limit_mode_selects_requested_envelope(self):
+        sentinel = object()
+        cases = (
+            ("safe", H1_SAFE_ARM_LOWER, H1_SAFE_ARM_UPPER),
+            ("hard", H1_HARD_ARM_LOWER, H1_HARD_ARM_UPPER),
+        )
+        for mode, expected_lower, expected_upper in cases:
+            with self.subTest(mode=mode), mock.patch.object(
+                H1MuJoCoLMIK, "from_urdf", return_value=sentinel
+            ) as loader:
+                result = H1MuJoCoLMIK.from_h1_assets(
+                    Path("/tmp/h1"), arm_limit_mode=mode
+                )
+                self.assertIs(result, sentinel)
+                np.testing.assert_allclose(
+                    loader.call_args.kwargs["arm_joint_lower"], expected_lower
+                )
+                np.testing.assert_allclose(
+                    loader.call_args.kwargs["arm_joint_upper"], expected_upper
+                )
+        with self.assertRaisesRegex(ValueError, "arm_limit_mode"):
+            H1MuJoCoLMIK.from_h1_assets(
+                Path("/tmp/h1"), arm_limit_mode="disabled"
+            )
+
     def test_missing_mujoco_has_actionable_error(self):
         with mock.patch.object(
             importlib, "import_module", side_effect=ModuleNotFoundError("mujoco")
@@ -410,6 +465,53 @@ except ImportError:
 
 @unittest.skipUnless(mujoco is not None, "MuJoCo not installed")
 class H1MuJoCoIntegrationTest(unittest.TestCase):
+    def test_h1_assets_use_proven_hardware_limits_not_raw_urdf_ranges(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        solver = H1MuJoCoLMIK.from_h1_assets(repo_root)
+
+        lower, upper = solver.arm_joint_limits
+        np.testing.assert_allclose(lower, H1_SAFE_ARM_LOWER)
+        np.testing.assert_allclose(upper, H1_SAFE_ARM_UPPER)
+        # This measured left base angle occurs in valid H1 recordings but the
+        # repository URDF incorrectly clips it at -1.57 rad.
+        recorded_q = np.zeros(14)
+        recorded_q[0] = -2.0
+        self.assertTrue(solver.arm_q_within_limits(recorded_q))
+
+        lower[0] = 99.0
+        self.assertNotEqual(solver.arm_joint_limits[0][0], 99.0)
+
+    def test_h1_joint_clipping_and_limit_tolerance(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        solver = H1MuJoCoLMIK.from_h1_assets(repo_root)
+        lower, upper = solver.arm_joint_limits
+        arm_q = np.zeros(14)
+        arm_q[0] = -2.0
+        arm_q[5] = 10.0
+        qpos = solver._full_qpos(arm_q)
+
+        solver._clip_arm_joints(qpos)
+
+        clipped = qpos[solver._qpos_addresses]
+        self.assertEqual(clipped[0], -2.0)
+        self.assertEqual(clipped[5], upper[5])
+        just_outside = np.zeros(14)
+        just_outside[5] = upper[5] + 0.01
+        self.assertFalse(solver.arm_q_within_limits(just_outside))
+        self.assertTrue(
+            solver.arm_q_within_limits(just_outside, tolerance=0.02)
+        )
+
+    def test_gravity_compensation_is_finite_and_nonzero(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        solver = H1MuJoCoLMIK.from_h1_assets(repo_root)
+
+        tau = solver.gravity_compensation(np.zeros(14))
+
+        self.assertEqual(tau.shape, (14,))
+        self.assertTrue(np.all(np.isfinite(tau)))
+        self.assertGreater(float(np.max(np.abs(tau))), 1.0)
+
     def test_h1_model_resolves_and_small_dual_arm_target_is_finite(self):
         repo_root = Path(__file__).resolve().parents[1]
         solver = H1MuJoCoLMIK.from_h1_assets(repo_root)

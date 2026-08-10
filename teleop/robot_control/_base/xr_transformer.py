@@ -118,6 +118,7 @@ class XRTransformer(ABC):
         init_wrist_ref_xr: np.ndarray,
         reference_ee_pose: np.ndarray,
         arm_scale: float = 1.0,
+        translation_axis_sign=(1.0, 1.0, 1.0),
     ) -> np.ndarray:
         """相对位姿变换 — XR 原始空间 → 机器人空间 → 叠加到冻结 EE 基准。
 
@@ -151,7 +152,10 @@ class XRTransformer(ABC):
 
         # Step 3: 基底变换到机器人坐标系
         ΔR_robot = R @ ΔR_xr @ R.T
-        displacement_robot = R @ displacement_xr
+        axis_sign = np.asarray(translation_axis_sign, dtype=float)
+        if axis_sign.shape != (3,) or not np.all(np.isin(axis_sign, (-1.0, 1.0))):
+            raise ValueError("translation_axis_sign must contain three +/-1 values")
+        displacement_robot = axis_sign * (R @ displacement_xr)
 
         # Step 4: 可选平移缩放
         if arm_scale != 1.0:
