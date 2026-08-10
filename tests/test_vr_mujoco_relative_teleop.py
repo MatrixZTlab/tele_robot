@@ -22,6 +22,10 @@ from teleop.robot_control.vr_mujoco_relative_teleop import (
     _rotation_error,
     _stack_dual_arm_system,
 )
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_HW_TO_MODEL_SIGN,
+    H1_MUJOCO_URDF_FILENAME,
+)
 
 
 def _rotz(angle: float) -> np.ndarray:
@@ -418,6 +422,10 @@ class H1MuJoCoLMIKTest(unittest.TestCase):
                     Path("/tmp/h1"), arm_limit_mode=mode
                 )
                 self.assertIs(result, sentinel)
+                self.assertEqual(
+                    loader.call_args.args[0].name,
+                    H1_MUJOCO_URDF_FILENAME,
+                )
                 np.testing.assert_allclose(
                     loader.call_args.kwargs["arm_joint_lower"], expected_lower
                 )
@@ -465,6 +473,36 @@ except ImportError:
 
 @unittest.skipUnless(mujoco is not None, "MuJoCo not installed")
 class H1MuJoCoIntegrationTest(unittest.TestCase):
+    def test_revised_fk_matches_legacy_fk_after_left_sign_conversion(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        model_dir = repo_root / "assets" / "topstar_h1"
+        revised = H1MuJoCoLMIK.from_h1_assets(
+            repo_root, arm_limit_mode="hard"
+        )
+        legacy = H1MuJoCoLMIK.from_urdf(
+            model_dir / "_tmp_h1_mujoco.urdf",
+            H1_LEFT_ARM_JOINT_NAMES,
+            H1_RIGHT_ARM_JOINT_NAMES,
+            left_ee_body="Robot_Left_Hand_6_Link",
+            right_ee_body="Robot_Right_Hand_6_Link",
+            ee_offset=(0.0, 0.0, 0.03),
+        )
+        revised_q = np.array(
+            [
+                -1.0, -0.5, 0.4, -0.8, 0.7, -0.6, 0.5,
+                1.0, -0.5, -0.4, -0.8, -0.7, -0.6, -0.5,
+            ]
+        )
+        legacy_sign = H1_ARM_HW_TO_MODEL_SIGN.copy()
+        legacy_sign[[3, 5]] = -1.0
+        legacy_q = revised_q * legacy_sign
+
+        revised_left, revised_right = revised.forward_kinematics(revised_q)
+        legacy_left, legacy_right = legacy.forward_kinematics(legacy_q)
+
+        np.testing.assert_allclose(revised_left, legacy_left, atol=1e-8)
+        np.testing.assert_allclose(revised_right, legacy_right, atol=1e-8)
+
     def test_h1_assets_use_proven_hardware_limits_not_raw_urdf_ranges(self):
         repo_root = Path(__file__).resolve().parents[1]
         solver = H1MuJoCoLMIK.from_h1_assets(repo_root)

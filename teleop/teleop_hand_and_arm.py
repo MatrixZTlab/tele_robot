@@ -24,6 +24,11 @@ import rclpy
 from televuer import TeleVuerWrapper
 from teleop.robot_control.factory import create_robot_driver
 from teleop.robot_control._base.control_mode import ControlMode
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_COORDINATE_CONVENTION,
+    H1_LEGACY_ARM_COORDINATE_CONVENTION,
+    H1_MODEL_REVISION,
+)
 from teleimager.image_client import ImageClient
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.record import Recorder, RecorderManager
@@ -551,6 +556,16 @@ def _process_record_requests():
                             'input_mode': args.input_mode,
                             'image_server_ip': args.img_server_ip,
                             'camera_config': camera_config,
+                            **(
+                                {
+                                    'robot_model_revision': H1_MODEL_REVISION,
+                                    'arm_coordinate_convention': (
+                                        H1_ARM_COORDINATE_CONVENTION
+                                    ),
+                                }
+                                if args.robot == 'TOPSTAR_H1'
+                                else {}
+                            ),
                         },
                     )
                 RECORD_RUNNING = True
@@ -610,6 +625,15 @@ if __name__ == '__main__':
     # replay options
     parser.add_argument('--replay', nargs='?', const='fast', default=None, help='Enable replay: --replay (fast) or --replay first (slow/safe)')
     parser.add_argument('--replay-file', dest='replay_file', type=str, default=None, help='Path to trajectory JSON file for replay')
+    parser.add_argument(
+        '--replay-arm-convention',
+        choices=('auto', 'legacy', 'hardware'),
+        default='auto',
+        help=(
+            'H1 replay joint convention. auto reads trajectory metadata and '
+            'treats untagged trajectories as legacy.'
+        ),
+    )
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
     parser.add_argument(
@@ -668,6 +692,12 @@ if __name__ == '__main__':
         logger_mp.info(f"Robot driver ready: {robot.config.model_name}, "
                        f"mode={control_mode.value}, "
                        f"controller={type(robot.controller).__name__}")
+        if args.robot.upper() == 'TOPSTAR_H1':
+            logger_mp.info(
+                "H1 model: %s; arm convention: %s",
+                H1_MODEL_REVISION,
+                H1_ARM_COORDINATE_CONVENTION,
+            )
         if args.latency_profile:
             logger_mp.info("Latency profile enabled; timing is printed once per second")
         # 为后向兼容保留 arm_ctrl 引用
@@ -786,6 +816,14 @@ if __name__ == '__main__':
                     ee_action_getter=ee_action_getter,
                     control_mode=control_mode,
                     robot_model=robot.config.model_name,
+                    robot_model_revision=(
+                        H1_MODEL_REVISION
+                        if args.robot.upper() == 'TOPSTAR_H1' else None
+                    ),
+                    arm_coordinate_convention=(
+                        H1_ARM_COORDINATE_CONVENTION
+                        if args.robot.upper() == 'TOPSTAR_H1' else None
+                    ),
                 )
                 recorder_manager.start()
             except Exception:
@@ -809,6 +847,13 @@ if __name__ == '__main__':
                     image_size=[image_width, image_height],
                     rerun_log=not (args.headless or args.no_rerun),
                 )
+                if args.robot == 'TOPSTAR_H1':
+                    episode_writer.info["robot_model_revision"] = (
+                        H1_MODEL_REVISION
+                    )
+                    episode_writer.info["arm_coordinate_convention"] = (
+                        H1_ARM_COORDINATE_CONVENTION
+                    )
                 if _body_joystick_controller is not None:
                     episode_writer.info["joint_names"]["body"] = [
                         "Robot_Body_Movement_Joint",
@@ -881,6 +926,31 @@ if __name__ == '__main__':
                 _traj_meta = _traj_data.get("metadata", {})
                 _traj_ee = _traj_meta.get("ee")
                 _traj_ctrl = _traj_meta.get("control_mode")
+
+                if args.robot.upper() == 'TOPSTAR_H1':
+                    if args.replay_arm_convention == 'legacy':
+                        _replay_arm_convention = H1_LEGACY_ARM_COORDINATE_CONVENTION
+                    elif args.replay_arm_convention == 'hardware':
+                        _replay_arm_convention = H1_ARM_COORDINATE_CONVENTION
+                    else:
+                        _replay_arm_convention = _traj_meta.get(
+                            "arm_coordinate_convention"
+                        )
+                        if _replay_arm_convention is None:
+                            _replay_arm_convention = (
+                                H1_LEGACY_ARM_COORDINATE_CONVENTION
+                            )
+                            logger_mp.warning(
+                                "Untagged H1 trajectory: interpreting left J4/J6 "
+                                "with the legacy URDF convention"
+                            )
+                    robot.set_replay_arm_coordinate_convention(
+                        _replay_arm_convention
+                    )
+                    logger_mp.info(
+                        "H1 replay arm convention: %s",
+                        _replay_arm_convention,
+                    )
 
                 if _traj_ee and not args.ee:
                     logger_mp.error(

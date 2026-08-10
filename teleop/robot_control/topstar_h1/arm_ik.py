@@ -14,6 +14,10 @@ import meshcat.geometry as mg
 
 from teleop.robot_control._base.arm_ik import BaseArmIK, IKResult
 from teleop.robot_control._base.control_mode import ControlMode
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_HARD_LOWER,
+    H1_ARM_HARD_UPPER,
+)
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
 
 
@@ -25,9 +29,9 @@ class H1ArmIK(BaseArmIK):
         # 缓存路径用本文件同级目录
         self._self_dir = os.path.dirname(os.path.abspath(__file__))
         cache_name = (
-            "topstar_h1_model_hard_limits_cache.pkl"
+            "topstar_h1_revise_model_hard_limits_cache.pkl"
             if config.limit_mode == "hard"
-            else "topstar_h1_model_cache.pkl"
+            else "topstar_h1_revise_model_cache.pkl"
         )
         config.cache_filename = os.path.join(self._self_dir, cache_name)
 
@@ -74,42 +78,12 @@ class H1ArmIK(BaseArmIK):
             raise ValueError("safety_deg must be finite and non-negative")
         margin = np.deg2rad(safety_deg)
 
-        _HW_SPECS = [
-            (-2.61799388,  2.61799388),   # sim[0]  L Shoulder Base
-            (-1.57079633,  0.43633231),   # sim[1]  L Shoulder
-            (-2.61799388,  2.61799388),   # sim[2]  L Elbow Yaw
-            (-1.79768913,  0.43633231),   # sim[3]  L Elbow
-            (-2.87979327,  2.87979327),   # sim[4]  L Wrist Yaw
-            (-1.53588974,  0.43633231),   # sim[5]  L Wrist Pitch
-            (-2.96705973,  2.96705973),   # sim[6]  L Wrist Roll
-            (-2.61799388,  2.61799388),   # sim[7]  R Shoulder Base
-            (-1.57079633,  0.43633231),   # sim[8]  R Shoulder
-            (-2.61799388,  2.61799388),   # sim[9]  R Elbow Yaw
-            (-1.79768913,  0.43633231),   # sim[10] R Elbow
-            (-2.87979327,  2.87979327),   # sim[11] R Wrist Yaw
-            (-1.53588974,  0.43633231),   # sim[12] R Wrist Pitch
-            (-2.96705973,  2.96705973),   # sim[13] R Wrist Roll
-        ]
-        _HW_TO_SIM_SIGN = np.array([
-             1.0,  1.0,  1.0, -1.0,  1.0, -1.0,  1.0,
-             1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
-        ])
-
         model = self.reduced_robot.model
         for i, idx in enumerate(self.arm_joint_indices):
-            if i >= len(_HW_SPECS):
+            if i >= H1_ARM_HARD_LOWER.size:
                 break
-            hw_lo, hw_hi = _HW_SPECS[i]
-            sign = _HW_TO_SIM_SIGN[i]
-
-            if sign > 0:
-                sim_lo, sim_hi = hw_lo, hw_hi
-            else:
-                sim_lo = hw_hi / sign
-                sim_hi = hw_lo / sign
-
-            lo_safe = sim_lo + margin
-            hi_safe = sim_hi - margin
+            lo_safe = H1_ARM_HARD_LOWER[i] + margin
+            hi_safe = H1_ARM_HARD_UPPER[i] - margin
             if lo_safe < hi_safe:
                 model.lowerPositionLimit[idx] = lo_safe
                 model.upperPositionLimit[idx] = hi_safe

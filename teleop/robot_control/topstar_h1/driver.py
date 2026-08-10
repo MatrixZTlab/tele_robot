@@ -8,6 +8,10 @@ from teleop.robot_control._base.dual_object_control import DualObjectController
 from teleop.robot_control.topstar_h1.config import H1RobotConfig
 from teleop.robot_control.topstar_h1.arm_ik import H1ArmIK
 from teleop.robot_control.topstar_h1.xr_transformer import H1XRTransformer
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_COORDINATE_CONVENTION,
+    arm_positions_to_current,
+)
 # H1ArmController 在 _build_components() 中惰性加载（需要 rclpy）
 from teleop.robot_control.ee.suction_cup import SuctionCupHandler
 
@@ -33,6 +37,7 @@ class H1RobotDriver(RobotDriver):
         self.l_shoulder = None
         self.r_shoulder = None
         self._prev_ee_state: dict = {}
+        self._replay_arm_coordinate_convention = H1_ARM_COORDINATE_CONVENTION
 
         super().__init__(config, control_mode, frequency, simulation_mode,
                          arm_scale, verbose)
@@ -103,6 +108,12 @@ class H1RobotDriver(RobotDriver):
 
     # ── 回放 ────────────────────────────────────────────────
 
+    def set_replay_arm_coordinate_convention(self, convention):
+        """Select how arm samples in a replay file should be interpreted."""
+        # Validate eagerly before the robot moves to the first trajectory point.
+        arm_positions_to_current(np.zeros(14), convention)
+        self._replay_arm_coordinate_convention = convention
+
     def replay_point(self, point, control_mode):
         """H1 回放：MoveJ→ArmRequest, ServoJ→LowCmd servo。"""
         import numpy as np
@@ -115,7 +126,9 @@ class H1RobotDriver(RobotDriver):
             np.asarray(joint_pose_deg, dtype=float)
         ).tolist()
 
-        arm_rad = joint_pose_rad[:14]
+        arm_rad = arm_positions_to_current(
+            joint_pose_rad[:14], self._replay_arm_coordinate_convention
+        ).tolist()
 
         # ── 末端执行器（吸盘/夹爪）：与手臂命令同步下发 ──
         ee_action = point.get("ee_action")

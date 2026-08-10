@@ -83,7 +83,9 @@ class Recorder:
     def start_program(self, program_name: str, description: str = "", filepath: Optional[str] = None, frequency: int = 500,
                       ee: Optional[str] = None,
                       control_mode: Optional[str] = None,
-                      robot_model: Optional[str] = None):
+                      robot_model: Optional[str] = None,
+                      robot_model_revision: Optional[str] = None,
+                      arm_coordinate_convention: Optional[str] = None):
         if self.json_file and not self.json_file.closed:
             self.json_file.close()
         self.json_file = None
@@ -108,6 +110,14 @@ class Recorder:
             self.metadata["robot_model"] = robot_model
         else:
             self.metadata.pop("robot_model", None)
+        if robot_model_revision is not None:
+            self.metadata["robot_model_revision"] = robot_model_revision
+        else:
+            self.metadata.pop("robot_model_revision", None)
+        if arm_coordinate_convention is not None:
+            self.metadata["arm_coordinate_convention"] = arm_coordinate_convention
+        else:
+            self.metadata.pop("arm_coordinate_convention", None)
         self.total_points = 0
         self.point_buffer = []
         self._first_point = True
@@ -503,7 +513,9 @@ class RecorderManager:
                  ee_type: Optional[str] = None,
                  ee_action_getter=None,   # Callable[[], Optional[List[float]]]
                  control_mode=None,       # ControlMode — 按模式采样
-                 robot_model=None):       # str — 写入轨迹 metadata
+                 robot_model=None,        # str — 写入轨迹 metadata
+                 robot_model_revision=None,
+                 arm_coordinate_convention=None):
         self.recorder = recorder
         self.arm_ctrl = arm_ctrl
         self.ik = ik
@@ -512,6 +524,8 @@ class RecorderManager:
         self.ee_action_getter = ee_action_getter
         self.control_mode = control_mode
         self.robot_model = robot_model
+        self.robot_model_revision = robot_model_revision
+        self.arm_coordinate_convention = arm_coordinate_convention
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._stop_event = threading.Event()
@@ -533,6 +547,8 @@ class RecorderManager:
             ee=self.ee_type,
             control_mode=self.control_mode.value if self.control_mode else None,
             robot_model=self.robot_model,
+            robot_model_revision=self.robot_model_revision,
+            arm_coordinate_convention=self.arm_coordinate_convention,
         )
 
     def stop_program(self):

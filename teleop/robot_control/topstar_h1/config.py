@@ -2,6 +2,9 @@
 from pathlib import Path
 
 from teleop.robot_control._base.robot_config import RobotConfig
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_MUJOCO_URDF_FILENAME,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _MODEL_DIR = _REPO_ROOT / "assets" / "topstar_h1"
@@ -13,7 +16,7 @@ class H1RobotConfig(RobotConfig):
     def __init__(self, **overrides):
         defaults = dict(
             model_name="TOPSTAR_H1",
-            urdf_path=str(_MODEL_DIR / "_tmp_h1_mujoco.urdf"),
+            urdf_path=str(_MODEL_DIR / H1_MUJOCO_URDF_FILENAME),
             model_dir=str(_MODEL_DIR),
             locked_joint_names=[
                 "Robot_Body_Movement_Joint",
@@ -58,7 +61,7 @@ class H1RobotConfig(RobotConfig):
                 "Robot_Body_Rotation_Joint",
             ],
             limit_mode="modified",
-            cache_filename="topstar_h1_model_cache.pkl",
+            cache_filename="topstar_h1_revise_model_cache.pkl",
             arm_max_reach=0.69,
             arm_scale_enabled=True,
             has_visualization=True,

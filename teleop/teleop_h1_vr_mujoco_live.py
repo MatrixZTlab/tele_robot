@@ -26,6 +26,10 @@ from teleop.robot_control.vr_mujoco_relative_teleop import (
     LMIKResult,
     VRRelativePoseTracker,
 )
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_COORDINATE_CONVENTION,
+    H1_MODEL_REVISION,
+)
 
 
 LOG = logging.getLogger("h1_vr_mujoco_live")
@@ -37,9 +41,9 @@ DEFAULT_DRY_RUN_INITIAL_Q = [
     -1.2305397,
     -1.1173229,
     -0.76580536,
-    0.7694363,
+    -0.7694363,
     0.54479694,
-    -0.348951,
+    0.348951,
     0.04157807,
     1.5395422,
     -1.3764126,
@@ -610,6 +614,8 @@ class FormalRecordingSession:
             frequency=int(round(self.frequency)),
             control_mode="arms_only",
             robot_model="TOPSTAR_H1_MUJOCO_IK",
+            robot_model_revision=H1_MODEL_REVISION,
+            arm_coordinate_convention=H1_ARM_COORDINATE_CONVENTION,
         )
         recorder.start_servo_recording()
         try:
@@ -630,6 +636,10 @@ class FormalRecordingSession:
                         "frequency_hz": self.frequency,
                         "control_mode": "incremental_mujoco_ik",
                         "robot_model": "TOPSTAR_H1_MUJOCO_IK",
+                        "robot_model_revision": H1_MODEL_REVISION,
+                        "arm_coordinate_convention": (
+                            H1_ARM_COORDINATE_CONVENTION
+                        ),
                     },
                 )
         except Exception:
@@ -1257,6 +1267,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     solver = H1MuJoCoLMIK.from_h1_assets(
         repo_root, arm_limit_mode=arm_limit_mode
+    )
+    LOG.info(
+        "H1 model: %s; arm convention: %s",
+        H1_MODEL_REVISION,
+        H1_ARM_COORDINATE_CONVENTION,
     )
     controller_mapping = args.controller_mapping or "same-side"
     LOG.info("Controller mapping: %s", controller_mapping)

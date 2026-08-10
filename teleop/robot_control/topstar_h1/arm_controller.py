@@ -11,6 +11,10 @@ from topstar_hg.msg import LowCmd, LowState, MotorCmd
 
 from teleop.robot_control._base.arm_controller import BaseArmController
 from teleop.robot_control._base.control_mode import ControlMode
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_HOME_Q,
+    H1_ARM_HW_TO_MODEL_SIGN,
+)
 from teleop.robot_control.topstar_h1.ros_node import H1RosNode
 logger = logging.getLogger(__name__)
 
@@ -38,10 +42,8 @@ class H1ArmController(BaseArmController):
         self.head_smooth_alpha = 0.8
         self.home_head_q = np.array([0.0, np.deg2rad(-19.0)], dtype=float)
         #self.home_head_q = np.array([0.0, np.deg2rad(0.0)], dtype=float)
-        self.joint_sign_map = np.ones(14, dtype=float)
-        if not self.simulation_mode:
-            self.joint_sign_map[3] = -1.0
-            self.joint_sign_map[5] = -1.0
+        # Topstar_Revise.urdf uses the hardware sign for every arm joint.
+        self.joint_sign_map = H1_ARM_HW_TO_MODEL_SIGN.copy()
 
         self.left_slots = list(range(11, 18))
         self.right_slots = list(range(4, 11))
@@ -310,24 +312,15 @@ class H1ArmController(BaseArmController):
 
  ################################################################################ VLA
     def _legacy_go_home(self, timeout=10.0):
-        self.move_joints_timed([
-            # 左臂 7 个关节
-            -1.496550020, -0.761539513, 0.203383218, 1.487247416,
-            -2.828934371, 0.727837205, 2.789105958,
-
-            # 右臂 7 个关节
-            1.496550020, -0.761539513, -0.203383218, -1.487247416,
-            2.828934371, -0.727837205, -2.789105958,
-        ], duration=5.0, head_q=self.home_head_q)
+        self.move_joints_timed(
+            H1_ARM_HOME_Q.tolist(), duration=5.0, head_q=self.home_head_q
+        )
 
     def go_home(self, timeout=10.0):
-        """Move both arms to the operator-provided X-View home pose (radians)."""
-        self.move_joints_timed([
-            -1.496550020, -0.761539513, 0.203383218, 1.487247416,
-            -2.828934371, 0.727837205, 2.789105958,
-            1.496550020, -0.761539513, -0.203383218, -1.487247416,
-            2.828934371, -0.727837205, -2.789105958,
-        ], duration=5.0, head_q=self.home_head_q)
+        """Move both arms to the X-View HOME in the revised convention."""
+        self.move_joints_timed(
+            H1_ARM_HOME_Q.tolist(), duration=5.0, head_q=self.home_head_q
+        )
 
     def wait_for_hold_expire(self, timeout=10.0):
         deadline = time.monotonic() + timeout

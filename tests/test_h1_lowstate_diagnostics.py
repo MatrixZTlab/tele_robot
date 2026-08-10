@@ -21,10 +21,7 @@ def test_raw_lowstate_contains_force_and_fault_diagnostics():
     controller = object.__new__(H1ArmController)
     controller.left_slots = list(range(11, 18))
     controller.right_slots = list(range(4, 11))
-    controller.joint_sign_map = np.array([
-        1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0,
-        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    ])
+    controller.joint_sign_map = np.ones(14)
     controller.publish_lock = threading.Lock()
     controller.last_published_q = np.linspace(-0.2, 0.2, 14)
     events = []
@@ -45,6 +42,10 @@ def test_raw_lowstate_contains_force_and_fault_diagnostics():
     assert len(event["motorstate"]) == 14
     assert event["motorstate"][:2] == [11, 12]
     assert event["motorstate"][7:9] == [4, 5]
+    np.testing.assert_allclose(
+        event["q"],
+        [0.01 * index for index in [*range(11, 18), *range(4, 11)]],
+    )
 
 
 def test_fixed_gripper_disables_active_ee_command_recording():

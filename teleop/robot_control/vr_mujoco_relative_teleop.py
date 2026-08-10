@@ -16,6 +16,14 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_HARD_LOWER as H1_HARD_ARM_LOWER,
+    H1_ARM_HARD_UPPER as H1_HARD_ARM_UPPER,
+    H1_ARM_SAFE_LOWER as H1_SAFE_ARM_LOWER,
+    H1_ARM_SAFE_UPPER as H1_SAFE_ARM_UPPER,
+    H1_MUJOCO_URDF_FILENAME,
+)
+
 
 _POSE_SHAPE = (4, 4)
 _ROTATION_SHAPE = (3, 3)
@@ -37,55 +45,6 @@ H1_LEFT_ARM_JOINT_NAMES = (
 H1_RIGHT_ARM_JOINT_NAMES = tuple(
     name.replace("Left", "Right") for name in H1_LEFT_ARM_JOINT_NAMES
 )
-
-# Hardware-convention limits converted to the 14-value simulation convention
-# used by H1ArmController, H1ArmIK, and this MuJoCo solver.  These are the same
-# limits used by the proven Pinocchio/CasADi H1 path.  The repository URDF is
-# not authoritative here: for example, it limits the left base joint to
-# -1.57 rad even though recorded, valid H1 states routinely reach -2.0 rad,
-# while several wrist ranges are substantially wider than the hardware range.
-H1_HARD_ARM_LOWER = np.array(
-    [
-        -2.61799388,
-        -1.57079633,
-        -2.61799388,
-        -0.43633231,
-        -2.87979327,
-        -0.43633231,
-        -2.96705973,
-        -2.61799388,
-        -1.57079633,
-        -2.61799388,
-        -1.79768913,
-        -2.87979327,
-        -1.53588974,
-        -2.96705973,
-    ],
-    dtype=np.float64,
-)
-H1_HARD_ARM_UPPER = np.array(
-    [
-        2.61799388,
-        0.43633231,
-        2.61799388,
-        1.79768913,
-        2.87979327,
-        1.53588974,
-        2.96705973,
-        2.61799388,
-        0.43633231,
-        2.61799388,
-        0.43633231,
-        2.87979327,
-        0.43633231,
-        2.96705973,
-    ],
-    dtype=np.float64,
-)
-_H1_JOINT_SAFETY_MARGIN_RAD = math.radians(5.0)
-H1_SAFE_ARM_LOWER = H1_HARD_ARM_LOWER + _H1_JOINT_SAFETY_MARGIN_RAD
-H1_SAFE_ARM_UPPER = H1_HARD_ARM_UPPER - _H1_JOINT_SAFETY_MARGIN_RAD
-
 
 def _validate_rotation(rotation: np.ndarray, name: str) -> np.ndarray:
     value = np.asarray(rotation, dtype=np.float64)
@@ -630,7 +589,7 @@ class H1MuJoCoLMIK:
             else Path(__file__).resolve().parents[2]
         )
         return cls.from_urdf(
-            root / "assets" / "topstar_h1" / "_tmp_h1_mujoco.urdf",
+            root / "assets" / "topstar_h1" / H1_MUJOCO_URDF_FILENAME,
             H1_LEFT_ARM_JOINT_NAMES,
             H1_RIGHT_ARM_JOINT_NAMES,
             left_ee_body="Robot_Left_Hand_6_Link",

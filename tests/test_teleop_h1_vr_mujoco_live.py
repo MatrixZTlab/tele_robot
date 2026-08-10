@@ -32,6 +32,10 @@ from teleop.robot_control.vr_mujoco_relative_teleop import (
     H1MuJoCoLMIK,
     LMIKResult,
 )
+from teleop.robot_control.topstar_h1.joint_convention import (
+    H1_ARM_COORDINATE_CONVENTION,
+    H1_MODEL_REVISION,
+)
 from teleop.utils.lerobot_episode_writer import flatten_numeric_tree
 
 
@@ -541,10 +545,13 @@ class FakeRecorder:
         self.points = []
         self._servo_recording = False
         self.finished = False
+        self.start_args = None
+        self.start_kwargs = None
         FakeRecorder.instances.append(self)
 
-    def start_program(self, *_args, **_kwargs):
-        pass
+    def start_program(self, *args, **kwargs):
+        self.start_args = args
+        self.start_kwargs = kwargs
 
     def start_servo_recording(self):
         self._servo_recording = True
@@ -595,6 +602,15 @@ class FormalRecordingSessionTest(unittest.TestCase):
 
     def test_frame_writes_lerobot_and_legacy_action(self):
         self.session.start()
+        recorder = FakeRecorder.instances[0]
+        self.assertEqual(
+            recorder.start_kwargs["arm_coordinate_convention"],
+            H1_ARM_COORDINATE_CONVENTION,
+        )
+        self.assertEqual(
+            recorder.start_kwargs["robot_model_revision"],
+            H1_MODEL_REVISION,
+        )
         ik = LMIKResult(
             arm_q=np.full(14, 0.2),
             converged=True,
@@ -618,7 +634,6 @@ class FormalRecordingSessionTest(unittest.TestCase):
 
         self.assertEqual(len(self.writer.frames), 1)
         self.assertEqual(self.writer.saved, 1)
-        recorder = FakeRecorder.instances[0]
         self.assertEqual(len(recorder.points), 1)
         np.testing.assert_allclose(recorder.points[0][0], np.degrees(0.15))
         self.assertTrue(recorder.finished)
