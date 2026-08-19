@@ -9,6 +9,10 @@ from teleop.robot_control.topstar_h1.joint_convention import (
     H1_ARM_HARD_LOWER,
     H1_ARM_HARD_UPPER,
     H1_ARM_HOME_Q,
+    H1_ARM_HOME_Q_BEFORE_2026_08_13_1659,
+    H1_ARM_HOME_Q_BEFORE_RIGHT_ARM_2026_08_13_1121,
+    H1_ARM_HOME_Q_2026_08_12,
+    H1_ARM_PREVIOUS_HOME_Q,
     H1_ARM_HW_TO_MODEL_SIGN,
     H1_ARM_SAFE_LOWER,
     H1_ARM_SAFE_UPPER,
@@ -43,9 +47,58 @@ def test_revised_arm_convention_is_hardware_aligned():
     assert np.all(H1_ARM_SAFE_UPPER < H1_ARM_HARD_UPPER)
 
 
-def test_xview_home_uses_revised_left_j4_j6_signs_and_hard_limits():
-    assert H1_ARM_HOME_Q[3] < 0.0
-    assert H1_ARM_HOME_Q[5] < 0.0
+def test_xview_home_uses_left_then_right_order_and_hard_limits():
+    expected = np.array(
+        [
+            -1.249638291135, -0.439753158332, 0.390569780011, -1.713093020710,
+            -2.298982597312, -0.905319736302, -0.775379973491,
+            1.257509726062, -0.420938508996, -0.402612551850, -1.700613916558,
+            2.175273659931, -0.830759270657, 0.942512702662,
+        ]
+    )
+    before_latest_adjustment = np.array(
+        [
+            -1.251523246728, -0.617270596553, 0.290911479722, -1.399317727786,
+            -2.319420402853, -0.731397676341, -0.829869152738,
+            0.988694114670, -0.655196601199, 0.185964831800, -1.372265124381,
+            2.226341993844, -0.541313867506, 0.712425947372,
+        ]
+    )
+    before_right_adjustment = np.array(
+        [
+            -1.251523246728, -0.617270596553, 0.290911479722, -1.399317727786,
+            -2.319420402853, -0.731397676341, -0.829869152738,
+            0.988833741010, -0.655091881444, 0.185964831800, -1.372282577673,
+            2.200947453227, -0.541331320799, 0.749025501786,
+        ]
+    )
+    expected_2026_08_12 = np.array(
+        [
+            -1.245100435080, -0.767246739177, 0.243124364803, -1.148479007690,
+            -2.212990225066, -0.503894008343, -0.953019584759,
+            0.986494999812, -0.585016911976, 0.187954507147, -1.333972600592,
+            2.182796029007, -0.435773807638, 0.766408981136,
+        ]
+    )
+    previous_expected = np.array(
+        [
+            -1.322488334, -0.800390542, 0.287473181, -1.509046578,
+            -2.502104016, -0.817320235, -0.526391302,
+            1.056622329, -0.701098761, 0.062639867, -1.608774691,
+            2.476866555, -0.845629476, 0.410972679,
+        ]
+    )
+    np.testing.assert_allclose(H1_ARM_HOME_Q, expected)
+    np.testing.assert_allclose(
+        H1_ARM_HOME_Q_BEFORE_2026_08_13_1659,
+        before_latest_adjustment,
+    )
+    np.testing.assert_allclose(
+        H1_ARM_HOME_Q_BEFORE_RIGHT_ARM_2026_08_13_1121,
+        before_right_adjustment,
+    )
+    np.testing.assert_allclose(H1_ARM_HOME_Q_2026_08_12, expected_2026_08_12)
+    np.testing.assert_allclose(H1_ARM_PREVIOUS_HOME_Q, previous_expected)
     assert np.all(H1_ARM_HOME_Q >= H1_ARM_HARD_LOWER)
     assert np.all(H1_ARM_HOME_Q <= H1_ARM_HARD_UPPER)
 

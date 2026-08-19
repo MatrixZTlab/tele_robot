@@ -50,9 +50,13 @@ class RawSessionWriter:
         self._written = Counter()
         self._dropped = Counter()
         self._failed = Counter()
+        self._duplicates = Counter()
         self._errors: list[dict[str, Any]] = []
         self._error_lock = threading.Lock()
         self._camera_fallback_sequence = Counter()
+        self._camera_last_sequence: dict[str, int] = {}
+        self._camera_epoch = Counter()
+        self._camera_seen: dict[str, set[tuple[Any, ...]]] = {}
         self._handles: dict[tuple[Path, str], Any] = {}
         self._closed = False
         self._worker = threading.Thread(target=self._run, name="raw-session-writer", daemon=True)
@@ -80,7 +84,11 @@ class RawSessionWriter:
             self._written.clear()
             self._dropped.clear()
             self._failed.clear()
+            self._duplicates.clear()
             self._camera_fallback_sequence.clear()
+            self._camera_last_sequence.clear()
+            self._camera_epoch.clear()
+            self._camera_seen.clear()
             with self._error_lock:
                 self._errors.clear()
 
@@ -104,7 +112,9 @@ class RawSessionWriter:
             session_dir = self._session_dir
             if session_dir is None or self._closed:
                 return False
-            return self._enqueue(("event", session_dir, str(stream), dict(event)), str(stream))
+            event_copy = dict(event)
+            event_copy["writer_enqueued_monotonic_ns"] = time.monotonic_ns()
+            return self._enqueue(("event", session_dir, str(stream), event_copy), str(stream))
 
     def append_camera_packet(self, stream: str, packet: dict[str, Any]) -> bool:
         with self._lock:
@@ -112,7 +122,35 @@ class RawSessionWriter:
             if session_dir is None or self._closed:
                 return False
             # Copy only the packet dictionary. Byte payloads are immutable and are not duplicated.
-            return self._enqueue(("camera", session_dir, str(stream), dict(packet)), f"camera.{stream}")
+            packet_copy = dict(packet)
+            sequence = packet_copy.get("sequence")
+            if sequence is not None:
+                sequence = int(sequence)
+                last_sequence = self._camera_last_sequence.get(str(stream))
+                if last_sequence is not None and sequence < last_sequence:
+                    self._camera_epoch[str(stream)] += 1
+                self._camera_last_sequence[str(stream)] = sequence
+                packet_copy["writer_stream_epoch"] = int(self._camera_epoch[str(stream)])
+                session_identity = packet_copy.get("stream_session_id")
+                if session_identity is None:
+                    session_identity = f"writer_epoch_{self._camera_epoch[str(stream)]}"
+                identity = (session_identity, sequence)
+            elif packet_copy.get("device_timestamp_raw") is not None:
+                identity = (
+                    packet_copy.get("stream_session_id", "legacy_device_clock"),
+                    "device_timestamp",
+                    packet_copy.get("device_timestamp_raw"),
+                )
+            else:
+                identity = None
+            if identity is not None:
+                seen = self._camera_seen.setdefault(str(stream), set())
+                if identity in seen:
+                    self._duplicates[f"camera.{stream}"] += 1
+                    return False
+                seen.add(identity)
+            packet_copy["writer_enqueued_monotonic_ns"] = time.monotonic_ns()
+            return self._enqueue(("camera", session_dir, str(stream), packet_copy), f"camera.{stream}")
 
     def stop_episode(self, timeout: float = 30.0) -> Path | None:
         with self._lock:
@@ -141,6 +179,7 @@ class RawSessionWriter:
             "written": dict(self._written),
             "dropped": dict(self._dropped),
             "failed": dict(self._failed),
+            "ignored_duplicates": dict(self._duplicates),
             "errors": errors,
             "complete": not errors,
             "capture_valid": not errors and not any(self._dropped.values()),
@@ -223,6 +262,11 @@ class RawSessionWriter:
         return handle
 
     def _write_event(self, session_dir: Path, stream: str, event: dict[str, Any]) -> None:
+        enqueued_ns = event.get("writer_enqueued_monotonic_ns")
+        if enqueued_ns is not None:
+            event["writer_queue_delay_ms"] = max(
+                0.0, (time.monotonic_ns() - int(enqueued_ns)) / 1e6
+            )
         handle = self._stream_handle(session_dir, stream)
         handle.write(json.dumps(_jsonable(event), ensure_ascii=False, separators=(",", ":")) + "\n")
         self._written[stream] += 1
@@ -232,20 +276,30 @@ class RawSessionWriter:
         if sequence is None:
             self._camera_fallback_sequence[stream] += 1
             sequence = self._camera_fallback_sequence[stream]
+            packet["sequence_source"] = "writer_fallback"
+        else:
+            packet["sequence_source"] = "producer"
         sequence = int(sequence)
         camera_dir = session_dir / "cameras" / stream
         camera_dir.mkdir(parents=True, exist_ok=True)
 
         index = {key: value for key, value in packet.items() if key not in ("jpg", "depth", "bgr")}
+        enqueued_ns = index.get("writer_enqueued_monotonic_ns")
+        if enqueued_ns is not None:
+            index["writer_queue_delay_ms"] = max(
+                0.0, (time.monotonic_ns() - int(enqueued_ns)) / 1e6
+            )
+        epoch = int(packet.get("writer_stream_epoch", 0))
+        filename_stem = f"e{epoch:03d}_{sequence:09d}" if epoch else f"{sequence:09d}"
         jpg = packet.get("jpg")
         if jpg:
-            image_path = camera_dir / f"{sequence:09d}.jpg"
+            image_path = camera_dir / f"{filename_stem}.jpg"
             image_path.write_bytes(bytes(jpg))
             index["image_path"] = str(image_path.relative_to(session_dir))
 
         depth = packet.get("depth")
         if depth is not None:
-            depth_path = camera_dir / f"{sequence:09d}.depth"
+            depth_path = camera_dir / f"{filename_stem}.depth"
             depth_path.write_bytes(bytes(depth))
             index["depth_path"] = str(depth_path.relative_to(session_dir))
 

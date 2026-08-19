@@ -20,6 +20,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from teleop.robot_control._base.dual_object_control import DualObjectController
 from teleop.robot_control.vr_mujoco_relative_teleop import (
     H1_XR_TO_ROBOT_ROTATION,
     H1MuJoCoLMIK,
@@ -35,6 +36,46 @@ from teleop.robot_control.topstar_h1.joint_convention import (
 LOG = logging.getLogger("h1_vr_mujoco_live")
 H1_ARM_DOF = 14
 CAMERA_SOURCES = ("head", "left_wrist", "right_wrist")
+CAMERA_CONFIG_BY_SOURCE = {
+    "head": "head_camera",
+    "left_wrist": "left_wrist_camera",
+    "right_wrist": "right_wrist_camera",
+}
+CAMERA_GETTER_BY_SOURCE = {
+    "head": "get_head_frame",
+    "left_wrist": "get_left_wrist_frame",
+    "right_wrist": "get_right_wrist_frame",
+}
+
+
+def build_camera_key_plan(
+    camera_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Assign stable color/depth keys without importing the online LeRobot writer."""
+    plan: list[dict[str, Any]] = []
+    index = 0
+    for source in CAMERA_SOURCES:
+        camera_name = CAMERA_CONFIG_BY_SOURCE[source]
+        config = (camera_config or {}).get(camera_name) or {}
+        if not config.get("enable_zmq", False):
+            continue
+        halves = (0, 1) if config.get("binocular", False) else (None,)
+        for half in halves:
+            plan.append(
+                {
+                    "cam": camera_name,
+                    "source": source,
+                    "half": half,
+                    "color_key": f"color_{index}",
+                    "depth_key": (
+                        f"depth_{index}"
+                        if config.get("enable_depth", False)
+                        else None
+                    ),
+                }
+            )
+            index += 1
+    return plan
 # A verified non-singular H1 arms-only pose from topstar_h1_test_004.  Dry-run
 # uses this instead of all zeros so the viewer starts from a useful IK posture.
 DEFAULT_DRY_RUN_INITIAL_Q = [
@@ -213,6 +254,24 @@ def _read_robot_arm_state(
     )
 
 
+def _wait_for_fresh_robot_arm_state(
+    controller: Any,
+    *,
+    freshness_timeout_s: float,
+    wait_timeout_s: float,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Wait through a short post-MoveJ callback gap without accepting stale data."""
+    deadline = time.monotonic() + float(wait_timeout_s)
+    while time.monotonic() < deadline:
+        q, dq, receive_ns = _read_robot_arm_state(controller)
+        if monotonic_timestamp_is_fresh(receive_ns, freshness_timeout_s):
+            return q, dq, receive_ns
+        time.sleep(0.02)
+    raise LiveSafetyError(
+        f"/lowstate did not recover within {wait_timeout_s:.2f} seconds"
+    )
+
+
 def _validate_robot_arm_state(
     solver: H1MuJoCoLMIK,
     q: Sequence[float],
@@ -309,9 +368,11 @@ class H1MuJoCoLiveCore:
         ema_alpha: float = 0.8,
         position_deadband_m: float = 0.01,
         rotation_deadband_deg: float = 3.0,
+        orientation_control: str = "vr",
         max_joint_speed_rad_s: float = 0.5,
         max_solver_jump_rad: float = 0.35,
         max_tracking_error_rad: float = 0.35,
+        tracking_error_check_enabled: bool = True,
         max_iters: int = 60,
         tolerance: float = 1e-4,
         damping: float = 1e-3,
@@ -321,6 +382,7 @@ class H1MuJoCoLiveCore:
         max_ik_position_error_m: float = 0.06,
         max_ik_rotation_error_rad: float = math.radians(5.0),
         hold_on_ik_safety: bool = False,
+        ik_safety_checks_enabled: bool = True,
         mirror_lateral_translation: bool = False,
     ) -> None:
         if not math.isfinite(max_solver_jump_rad) or max_solver_jump_rad <= 0.0:
@@ -332,6 +394,8 @@ class H1MuJoCoLiveCore:
             raise ValueError(
                 "max_tracking_error_rad must be finite and greater than zero"
             )
+        if orientation_control not in ("vr", "locked"):
+            raise ValueError("orientation_control must be 'vr' or 'locked'")
         if (
             not math.isfinite(max_ik_position_error_m)
             or max_ik_position_error_m <= 0.0
@@ -351,9 +415,11 @@ class H1MuJoCoLiveCore:
         self.ema_alpha = ema_alpha
         self.position_deadband_m = position_deadband_m
         self.rotation_deadband_deg = rotation_deadband_deg
+        self.orientation_control = orientation_control
         self.max_joint_speed_rad_s = max_joint_speed_rad_s
         self.max_solver_jump_rad = max_solver_jump_rad
         self.max_tracking_error_rad = max_tracking_error_rad
+        self.tracking_error_check_enabled = bool(tracking_error_check_enabled)
         self.max_iters = max_iters
         self.tolerance = tolerance
         self.damping = damping
@@ -368,12 +434,25 @@ class H1MuJoCoLiveCore:
         self.max_ik_position_error_m = max_ik_position_error_m
         self.max_ik_rotation_error_rad = max_ik_rotation_error_rad
         self.hold_on_ik_safety = bool(hold_on_ik_safety)
+        self.ik_safety_checks_enabled = bool(ik_safety_checks_enabled)
         self.mirror_lateral_translation = bool(mirror_lateral_translation)
         self.left_tracker: VRRelativePoseTracker | None = None
         self.right_tracker: VRRelativePoseTracker | None = None
         self.previous_command_q: np.ndarray | None = None
         self.previous_raw_ik_q: np.ndarray | None = None
+        # Reuse the proven rigid-grasp controller from teleop_hand_and_arm.py.
+        # It operates on the already mapped/scaled robot EE targets here, so
+        # mirrored controller mapping and position scale remain unchanged.
+        self.dual_object_controller = DualObjectController(
+            max_translation_speed_m_s=None,
+            max_rotation_speed_rad_s=None,
+            max_rotation_disagreement_rad=math.radians(25.0),
+        )
         self.active = False
+
+    @property
+    def dual_object_locked(self) -> bool:
+        return self.dual_object_controller.locked
 
     def arm(
         self,
@@ -388,6 +467,7 @@ class H1MuJoCoLiveCore:
             ema_alpha=self.ema_alpha,
             position_deadband=self.position_deadband_m,
             rotation_deadband_deg=self.rotation_deadband_deg,
+            lock_orientation=self.orientation_control == "locked",
             translation_axis_sign=(
                 (1.0, -1.0, 1.0)
                 if self.mirror_lateral_translation
@@ -404,7 +484,58 @@ class H1MuJoCoLiveCore:
         self.right_tracker.update(right_wrist_pose)
         self.previous_command_q = current
         self.previous_raw_ik_q = current.copy()
+        self.dual_object_controller.reset()
         self.active = True
+
+    def toggle_dual_object_lock(
+        self,
+        current_q: Sequence[float],
+        left_wrist_pose: np.ndarray,
+        right_wrist_pose: np.ndarray,
+        *,
+        now_s: float | None = None,
+    ) -> tuple[bool, float | None]:
+        """Lock/unlock the measured dual-arm grasp without a target jump."""
+        if not self.active or self.left_tracker is None or self.right_tracker is None:
+            raise LiveSafetyError("teleoperation must be armed before box lock")
+
+        current = _as_arm_q(current_q, "current_q")
+        left_input = self.left_tracker.update(left_wrist_pose)
+        right_input = self.right_tracker.update(right_wrist_pose)
+        actual_left, actual_right = self.solver.forward_kinematics(current)
+        width_m = float(
+            np.linalg.norm(actual_right[:3, 3] - actual_left[:3, 3])
+        )
+        if not 0.10 <= width_m <= 1.50:
+            raise LiveSafetyError(
+                f"measured grasp width {width_m:.3f} m is outside [0.10, 1.50] m"
+            )
+
+        if self.dual_object_controller.locked:
+            self.dual_object_controller.unlock(
+                left_input,
+                right_input,
+                actual_left,
+                actual_right,
+            )
+            locked = False
+            lock_width = None
+        else:
+            lock_width = self.dual_object_controller.lock(
+                left_input,
+                right_input,
+                actual_left,
+                actual_right,
+                now_s=time.monotonic() if now_s is None else float(now_s),
+            )
+            locked = True
+
+        # Rebase the command-side safety references to the same measured pose.
+        # This prevents a legitimate lock transition from looking like an IK
+        # branch jump or tracking error on its first frame.
+        self.previous_command_q = current.copy()
+        self.previous_raw_ik_q = current.copy()
+        return locked, lock_width
 
     def disarm(self) -> None:
         self.active = False
@@ -412,6 +543,7 @@ class H1MuJoCoLiveCore:
         self.right_tracker = None
         self.previous_command_q = None
         self.previous_raw_ik_q = None
+        self.dual_object_controller.reset()
 
     def _hold_previous_command(self, result: LMIKResult) -> LiveStepResult:
         if self.previous_command_q is None or self.previous_raw_ik_q is None:
@@ -445,13 +577,21 @@ class H1MuJoCoLiveCore:
         tracking_error = float(
             np.max(np.abs(self.previous_command_q - current))
         )
-        if tracking_error > self.max_tracking_error_rad:
+        if (
+            self.tracking_error_check_enabled
+            and tracking_error > self.max_tracking_error_rad
+        ):
             raise LiveSafetyError(
                 f"robot tracking error {tracking_error:.4f} rad exceeds "
                 f"{self.max_tracking_error_rad:.4f} rad"
             )
         left_target = self.left_tracker.update(left_wrist_pose)
         right_target = self.right_tracker.update(right_wrist_pose)
+        left_target, right_target = self.dual_object_controller.targets(
+            left_target,
+            right_target,
+            now_s=time.monotonic(),
+        )
         result = self.solver.solve(
             left_target,
             right_target,
@@ -465,7 +605,7 @@ class H1MuJoCoLiveCore:
         )
         accepted_approximately = False
         if not result.converged:
-            if (
+            if self.ik_safety_checks_enabled and (
                 result.translation_error_norm > self.max_ik_position_error_m
                 or result.rotation_error_norm > self.max_ik_rotation_error_rad
             ):
@@ -485,7 +625,10 @@ class H1MuJoCoLiveCore:
         # user can legitimately move faster than the configured robot speed,
         # in which case the command lags the target by design.
         solver_jump = float(np.max(np.abs(raw_ik_q - self.previous_raw_ik_q)))
-        if solver_jump > self.max_solver_jump_rad:
+        if (
+            self.ik_safety_checks_enabled
+            and solver_jump > self.max_solver_jump_rad
+        ):
             if self.hold_on_ik_safety:
                 return self._hold_previous_command(result)
             raise LiveSafetyError(
@@ -514,13 +657,13 @@ class H1MuJoCoLiveCore:
 
 
 class FormalRecordingSession:
-    """Record incremental teleop frames using the old complete data path.
+    """Record raw sensor/control streams without duplicate trajectory files.
 
-    The LeRobot writer remains available for the newer dataset format.  When
-    supplied, ``legacy_episode_writer`` and ``raw_writer`` mirror the
-    ``teleop_hand_and_arm.py`` recording lifecycle: ``episode_XXXX`` contains
-    images/state/action JSON, while ``raw/episode_XXXX`` contains asynchronous
-    camera, Pico and controller streams.
+    By default the live entry point does not provide ``legacy_episode_writer``:
+    compressed camera packets are written once under ``raw/episode_XXXX`` and
+    image alignment/legacy/LeRobot conversion are offline steps.  Supplying a
+    writer is retained for compatibility and tests, but must not be used on the
+    latency-sensitive raw capture path.
     """
 
     def __init__(
@@ -529,45 +672,46 @@ class FormalRecordingSession:
         image_client: Any,
         camera_config: dict[str, Any],
         camera_key_plan: list[dict[str, Any]],
-        episode_writer: Any,
-        recorder_cls: Any,
+        legacy_episode_writer: Any | None,
         output_root: Path,
         task_name: str,
         task_description: str,
         frequency: float,
         sync_tolerance_s: float,
         camera_sync_tolerance_s: float,
-        legacy_episode_writer: Any | None = None,
         raw_writer: Any | None = None,
         max_camera_age_s: float = 0.10,
     ) -> None:
         self.image_client = image_client
         self.camera_config = camera_config
         self.camera_key_plan = camera_key_plan
-        self.episode_writer = episode_writer
-        self.recorder_cls = recorder_cls
+        self.enabled_camera_sources = tuple(
+            dict.fromkeys(entry["source"] for entry in camera_key_plan)
+        )
+        if not self.enabled_camera_sources:
+            raise ValueError("recording requires at least one enabled camera")
+        self.legacy_episode_writer = legacy_episode_writer
         self.output_root = output_root
         self.task_name = task_name
         self.task_description = task_description
         self.frequency = frequency
         self.sync_tolerance_s = sync_tolerance_s
         self.camera_sync_tolerance_s = camera_sync_tolerance_s
-        self.legacy_episode_writer = legacy_episode_writer
         self.raw_writer = raw_writer
+        if self.raw_writer is None and self.legacy_episode_writer is None:
+            raise ValueError("recording requires a raw or legacy writer")
         self.max_camera_age_s = float(max_camera_age_s)
         self.active = False
-        self.episode_index = 0
+        self.episode_index = self._next_episode_index()
         self.last_saved_episode_index: int | None = None
         self.frame_index = 0
-        self.legacy_recorder: Any = None
         self._prefetched_images: dict[str, Any] | None = None
         self._raw_listeners: list[tuple[str, Any]] = []
         if self.raw_writer is not None and hasattr(
             self.image_client, "add_packet_listener"
         ):
-            for camera_name in (
-                "head_camera", "left_wrist_camera", "right_wrist_camera"
-            ):
+            for source in self.enabled_camera_sources:
+                camera_name = CAMERA_CONFIG_BY_SOURCE[source]
                 listener = self.raw_writer.append_camera_packet
                 try:
                     self.image_client.add_packet_listener(camera_name, listener)
@@ -575,18 +719,40 @@ class FormalRecordingSession:
                 except Exception:
                     LOG.exception("failed to attach raw listener: %s", camera_name)
 
+    def _next_episode_index(self) -> int:
+        """Choose an unused raw episode id across repeated program launches."""
+        if self.legacy_episode_writer is not None:
+            return 0
+        raw_root = self.output_root / "raw"
+        indices = []
+        if raw_root.exists():
+            for path in raw_root.glob("episode_*"):
+                try:
+                    indices.append(int(path.name.rsplit("_", 1)[1]))
+                except (IndexError, ValueError):
+                    continue
+        return max(indices, default=-1) + 1
+
     def _read_images(self) -> dict[str, Any]:
         return {
-            "head": self.image_client.get_head_frame(),
-            "left_wrist": self.image_client.get_left_wrist_frame(),
-            "right_wrist": self.image_client.get_right_wrist_frame(),
+            source: getattr(
+                self.image_client, CAMERA_GETTER_BY_SOURCE[source]
+            )()
+            for source in self.enabled_camera_sources
         }
 
     def _missing_physical_cameras(self, images: dict[str, Any]) -> list[str]:
         missing = []
-        for source in CAMERA_SOURCES:
+        for source in self.enabled_camera_sources:
             image = images.get(source)
-            if image is None or getattr(image, "bgr", None) is None:
+            if image is None:
+                missing.append(source)
+                continue
+            if self.legacy_episode_writer is not None:
+                available = getattr(image, "bgr", None) is not None
+            else:
+                available = bool(getattr(image, "jpg", None))
+            if not available:
                 missing.append(source)
         return missing
 
@@ -601,31 +767,16 @@ class FormalRecordingSession:
                 + ", ".join(missing)
             )
 
-        legacy_name = (
-            self.task_name
-            if self.episode_index == 0
-            else f"{self.task_name}_episode_{self.episode_index:03d}"
-        )
-        recorder = self.recorder_cls(buffer_size=1000)
-        recorder.start_program(
-            legacy_name,
-            self.task_description,
-            filepath=str(self.output_root),
-            frequency=int(round(self.frequency)),
-            control_mode="arms_only",
-            robot_model="TOPSTAR_H1_MUJOCO_IK",
-            robot_model_revision=H1_MODEL_REVISION,
-            arm_coordinate_convention=H1_ARM_COORDINATE_CONVENTION,
-        )
-        recorder.start_servo_recording()
         try:
-            if not self.episode_writer.create_episode():
-                raise RuntimeError("LeRobot episode is already active")
             if self.legacy_episode_writer is not None:
                 if not self.legacy_episode_writer.create_episode():
                     raise RuntimeError("legacy episode writer is busy")
                 self.episode_index = int(
-                    getattr(self.legacy_episode_writer, "episode_id", self.episode_index)
+                    getattr(
+                        self.legacy_episode_writer,
+                        "episode_id",
+                        self.episode_index,
+                    )
                 )
             if self.raw_writer is not None:
                 self.raw_writer.start_episode(
@@ -648,11 +799,8 @@ class FormalRecordingSession:
                     self.legacy_episode_writer.discard_episode(self.episode_index)
                 except Exception:
                     pass
-            recorder.stop_servo_recording(smooth_window_size=1)
-            recorder.finish()
             raise
 
-        self.legacy_recorder = recorder
         self._prefetched_images = images
         self.frame_index = 0
         self.active = True
@@ -662,9 +810,19 @@ class FormalRecordingSession:
             raise RuntimeError("recording is not active")
         images = self._prefetched_images or self._read_images()
         self._prefetched_images = None
-        return extract_camera_batch(
-            self.camera_config, self.camera_key_plan, images
-        )
+        if self.legacy_episode_writer is not None:
+            return extract_camera_batch(
+                self.camera_config, self.camera_key_plan, images
+            )
+        timestamps_ns: dict[str, int] = {}
+        for entry in self.camera_key_plan:
+            image = images.get(entry["source"])
+            timestamp_ns = (
+                None if image is None else getattr(image, "timestamp_ns", None)
+            )
+            if timestamp_ns is not None:
+                timestamps_ns[entry["color_key"]] = int(timestamp_ns)
+        return CameraBatch({}, {}, timestamps_ns)
 
     def add_frame(
         self,
@@ -680,9 +838,8 @@ class FormalRecordingSession:
         pico_timestamp_ns: int | None = None,
         state_receive_timestamp_ns: int | None = None,
     ) -> None:
-        if not self.active or self.legacy_recorder is None:
+        if not self.active:
             raise RuntimeError("recording is not active")
-        states, actions = build_lerobot_state_action(measured_q, command_q)
         camera_timestamps = list(camera_batch.timestamps_ns.values())
         camera_sync_skew_s = None
         if camera_timestamps:
@@ -746,17 +903,9 @@ class FormalRecordingSession:
                 "rotation_error_norm": float(ik_result.rotation_error_norm),
             },
         }
-        self.episode_writer.add_item(
-            colors=camera_batch.colors,
-            depths=camera_batch.depths,
-            states=states,
-            actions=actions,
-            alignment=alignment,
-        )
-
-        # The old EpisodeWriter expects JSON-native lists rather than numpy
-        # arrays.  Keep its exact state/action tree alongside LeRobot.
         if self.legacy_episode_writer is not None:
+            states, actions = build_lerobot_state_action(measured_q, command_q)
+
             def _json_tree(value: Any) -> Any:
                 if isinstance(value, np.ndarray):
                     return value.tolist()
@@ -776,19 +925,6 @@ class FormalRecordingSession:
                 alignment=_json_tree(legacy_alignment),
             )
 
-        command_deg = np.rad2deg(
-            _as_arm_q(command_q, "command_q")
-        ).tolist()
-        measured_deg = np.rad2deg(
-            _as_arm_q(measured_q, "measured_q")
-        ).tolist()
-        raw_ik_deg = np.rad2deg(_as_arm_q(raw_ik_q, "raw_ik_q")).tolist()
-        self.legacy_recorder.add_ServoJ(
-            command_deg,
-            state_joint_pose=measured_deg,
-            raw_ik_joint_pose=raw_ik_deg,
-            frame_index=self.frame_index,
-        )
         self.frame_index += 1
 
         if self.raw_writer is not None:
@@ -822,26 +958,12 @@ class FormalRecordingSession:
                 self.raw_writer.stop_episode()
         except Exception as exc:
             errors.append(f"raw stream save failed: {exc}")
-        try:
-            if self.legacy_episode_writer is not None:
+        if self.legacy_episode_writer is not None:
+            try:
                 self.legacy_episode_writer.save_episode()
-        except Exception as exc:
-            errors.append(f"legacy episode save failed: {exc}")
-        try:
-            self.episode_writer.save_episode()
-        except Exception as exc:
-            errors.append(f"LeRobot save failed: {exc}")
-        try:
-            if self.legacy_recorder is not None:
-                if self.legacy_recorder._servo_recording:
-                    self.legacy_recorder.stop_servo_recording(
-                        smooth_window_size=1
-                    )
-                self.legacy_recorder.finish()
-        except Exception as exc:
-            errors.append(f"legacy JSON save failed: {exc}")
+            except Exception as exc:
+                errors.append(f"legacy episode save failed: {exc}")
         self.active = False
-        self.legacy_recorder = None
         self._prefetched_images = None
         self.last_saved_episode_index = int(self.episode_index)
         self.episode_index += 1
@@ -864,22 +986,7 @@ class FormalRecordingSession:
                 self.legacy_episode_writer.discard_episode(episode_index)
             except Exception as exc:
                 errors.append(f"legacy discard failed: {exc}")
-        # No LeRobot frames are committed until its schema warmup completes;
-        # clear that in-memory episode when possible.  Previously committed
-        # LeRobot frames are intentionally left intact rather than deleting an
-        # unrelated dataset episode.
-        self.episode_writer.pending_alignment = []
-        self.episode_writer._warmup_samples = []
-        self.episode_writer.episode_active = False
-        if self.legacy_recorder is not None:
-            try:
-                if self.legacy_recorder._servo_recording:
-                    self.legacy_recorder.stop_servo_recording(smooth_window_size=1)
-                self.legacy_recorder.close()
-            except Exception as exc:
-                errors.append(f"trajectory discard failed: {exc}")
         self.active = False
-        self.legacy_recorder = None
         self._prefetched_images = None
         self.episode_index += 1
         if errors:
@@ -917,7 +1024,6 @@ class FormalRecordingSession:
         finally:
             if self.raw_writer is not None:
                 self.raw_writer.close()
-            self.episode_writer.close()
         if stop_error is not None:
             raise stop_error
 
@@ -1017,6 +1123,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ema-alpha", type=float, default=0.8)
     parser.add_argument("--position-deadband-m", type=float, default=0.01)
     parser.add_argument("--rotation-deadband-deg", type=float, default=3.0)
+    parser.add_argument(
+        "--orientation-control",
+        choices=("vr", "locked"),
+        default="vr",
+        help=(
+            "vr maps controller wrist rotation to each end effector; locked "
+            "captures each measured end-effector rotation when Left A arms "
+            "teleoperation and then accepts translation only"
+        ),
+    )
     parser.add_argument("--max-joint-speed", type=float, default=0.5)
     parser.add_argument(
         "--max-solver-jump",
@@ -1028,7 +1144,34 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max-tracking-error", type=float, default=0.35)
+    parser.add_argument(
+        "--disable-tracking-error-check",
+        action="store_true",
+        help=(
+            "do not disarm when commanded and measured arm joints diverge; "
+            "mechanical limits, IK jump checks, ROS graph checks, and state "
+            "timeouts remain active"
+        ),
+    )
     parser.add_argument("--state-timeout", type=float, default=0.25)
+    parser.add_argument(
+        "--legacy-stale-state-behavior",
+        action="store_true",
+        help=(
+            "match the old teleop loop during brief /lowstate gaps by using "
+            "the last valid measured arm state instead of disarming; a hard "
+            "timeout still stops live control"
+        ),
+    )
+    parser.add_argument(
+        "--legacy-stale-state-hard-timeout",
+        type=float,
+        default=2.0,
+        help=(
+            "maximum /lowstate age allowed by legacy compatibility mode "
+            "before live control is disarmed"
+        ),
+    )
     parser.add_argument(
         "--pico-timeout",
         type=float,
@@ -1058,6 +1201,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max-ik-rotation-error-deg", type=float, default=5.0)
+    parser.add_argument(
+        "--disable-ik-safety-checks",
+        action="store_true",
+        help=(
+            "dry-run only: accept finite in-limit IK output even when the "
+            "solver does not converge or changes branches"
+        ),
+    )
     parser.add_argument("--ik-damping", type=float, default=1e-3)
     parser.add_argument(
         "--current-q-weight",
@@ -1087,7 +1238,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--record",
         action="store_true",
-        help="record synchronized LeRobot videos/state/action and legacy JSON",
+        help=(
+            "record compressed raw camera, LowState, LowCmd, Pico, and control "
+            "streams; generate aligned legacy/LeRobot data offline"
+        ),
+    )
+    parser.add_argument(
+        "--record-cameras",
+        nargs="+",
+        choices=CAMERA_SOURCES,
+        default=None,
+        help=(
+            "physical cameras to record; omitted requires head, left_wrist, "
+            "and right_wrist, while e.g. '--record-cameras head' explicitly "
+            "enables head-only recording"
+        ),
     )
     parser.add_argument(
         "--no-rerun",
@@ -1117,7 +1282,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="incremental Pico arm teleoperation",
         help="task steps stored in the legacy episode metadata",
     )
-    parser.add_argument("--lerobot-repo-id", default=None)
+    parser.add_argument(
+        "--lerobot-repo-id",
+        default=None,
+        help="deprecated for live recording; pass the repo id to offline export",
+    )
     parser.add_argument("--sync-tolerance-s", type=float, default=1e-4)
     parser.add_argument(
         "--camera-sync-tolerance-s", type=float, default=0.02
@@ -1128,7 +1297,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.10,
         help="maximum camera age recorded in alignment metadata",
     )
-    parser.add_argument("--video-codec", default="h264")
+    parser.add_argument(
+        "--video-codec",
+        default="h264",
+        help="deprecated for live recording; pass the codec to offline export",
+    )
     parser.add_argument(
         "--dry-run-initial-q",
         type=float,
@@ -1141,12 +1314,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.live and args.disable_ik_safety_checks:
+        raise ValueError("--disable-ik-safety-checks is only allowed in dry-run mode")
     positive = {
         "frequency": args.frequency,
         "arm_scale": args.arm_scale,
         "max_joint_speed": args.max_joint_speed,
         "max_tracking_error": args.max_tracking_error,
         "state_timeout": args.state_timeout,
+        "legacy_stale_state_hard_timeout": (
+            args.legacy_stale_state_hard_timeout
+        ),
         "pico_timeout": args.pico_timeout,
         "max_arm_speed_at_arm": args.max_arm_speed_at_arm,
         "ik_tolerance": args.ik_tolerance,
@@ -1157,6 +1335,14 @@ def _validate_args(args: argparse.Namespace) -> None:
     for name, value in positive.items():
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"--{name.replace('_', '-')} must be greater than zero")
+    if (
+        args.legacy_stale_state_behavior
+        and args.legacy_stale_state_hard_timeout <= args.state_timeout
+    ):
+        raise ValueError(
+            "--legacy-stale-state-hard-timeout must be greater than "
+            "--state-timeout"
+        )
     if args.max_solver_jump is not None and (
         not math.isfinite(args.max_solver_jump) or args.max_solver_jump <= 0.0
     ):
@@ -1174,14 +1360,16 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.record:
         if not args.task_name.strip():
             raise ValueError("--task-name cannot be empty when recording")
+        if not args.raw_record:
+            raise ValueError(
+                "--no-raw-record is incompatible with raw-only online recording"
+            )
         if args.sync_tolerance_s < 0.0 or args.camera_sync_tolerance_s < 0.0:
             raise ValueError("recording tolerances must be non-negative")
         if args.max_camera_age_s < 0.0:
             raise ValueError("--max-camera-age-s must be non-negative")
         if args.raw_record_queue_size <= 0:
             raise ValueError("--raw-record-queue-size must be greater than zero")
-        if not args.video_codec.strip():
-            raise ValueError("--video-codec cannot be empty")
     if args.live and args.controller_mapping is None:
         raise ValueError(
             "--live requires an explicit --controller-mapping "
@@ -1284,9 +1472,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ema_alpha=args.ema_alpha,
         position_deadband_m=args.position_deadband_m,
         rotation_deadband_deg=args.rotation_deadband_deg,
+        orientation_control=args.orientation_control,
         max_joint_speed_rad_s=args.max_joint_speed,
         max_solver_jump_rad=max_solver_jump,
         max_tracking_error_rad=args.max_tracking_error,
+        tracking_error_check_enabled=not args.disable_tracking_error_check,
         max_iters=args.ik_max_iters,
         tolerance=args.ik_tolerance,
         damping=args.ik_damping,
@@ -1298,8 +1488,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.max_ik_rotation_error_deg
         ),
         hold_on_ik_safety=not args.live,
+        ik_safety_checks_enabled=not args.disable_ik_safety_checks,
         mirror_lateral_translation=controller_mapping == "mirrored",
     )
+    if args.disable_tracking_error_check:
+        LOG.warning(
+            "TRACKING ERROR CHECK DISABLED: command/measured arm divergence "
+            "will not disarm teleoperation; all other live safeguards remain active"
+        )
+    if args.legacy_stale_state_behavior:
+        LOG.warning(
+            "LEGACY STALE-STATE MODE: brief /lowstate gaps reuse the last "
+            "valid measured state; hard disarm remains at %.2f seconds",
+            args.legacy_stale_state_hard_timeout,
+        )
+    if args.disable_ik_safety_checks:
+        LOG.warning(
+            "DRY-RUN IK SAFETY CHECKS DISABLED: non-converged and branch-jump "
+            "solutions will be displayed when finite and within mechanical limits"
+        )
+    LOG.info("End-effector orientation control: %s", args.orientation_control)
 
     controller = None
     tv_wrapper = None
@@ -1368,73 +1576,46 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.record:
             from teleimager.image_client import ImageClient
-            from teleop.utils.lerobot_episode_writer import (
-                LeRobotEpisodeWriter,
-                build_camera_key_plan,
-                default_repo_id,
-            )
-            from teleop.utils.episode_writer import EpisodeWriter
             from teleop.utils.raw_session_writer import RawSessionWriter
-            from teleop.utils.record import Recorder
 
             image_client = ImageClient(
-                host=args.img_server_ip, request_bgr=True
+                host=args.img_server_ip, request_bgr=False
             )
             camera_config = image_client.get_cam_config()
+            requested_camera_sources = tuple(
+                dict.fromkeys(args.record_cameras or CAMERA_SOURCES)
+            )
             missing_config = [
                 source
-                for config_key, source in (
-                    ("head_camera", "head"),
-                    ("left_wrist_camera", "left_wrist"),
-                    ("right_wrist_camera", "right_wrist"),
-                )
+                for source in requested_camera_sources
+                for config_key in (CAMERA_CONFIG_BY_SOURCE[source],)
                 if not (camera_config.get(config_key) or {}).get(
                     "enable_zmq", False
                 )
             ]
             if missing_config:
                 raise RuntimeError(
-                    "formal recording requires three ZMQ cameras; disabled: "
+                    "requested ZMQ cameras are disabled: "
                     + ", ".join(missing_config)
                 )
+            camera_config = {
+                key: dict(value) if isinstance(value, dict) else value
+                for key, value in camera_config.items()
+            }
+            for source, config_key in CAMERA_CONFIG_BY_SOURCE.items():
+                if source not in requested_camera_sources:
+                    camera_entry = camera_config.get(config_key)
+                    if not isinstance(camera_entry, dict):
+                        camera_entry = {}
+                        camera_config[config_key] = camera_entry
+                    camera_entry["enable_zmq"] = False
+            if args.record_cameras is not None:
+                LOG.warning(
+                    "PARTIAL CAMERA RECORDING: %s",
+                    ", ".join(requested_camera_sources),
+                )
             camera_key_plan = build_camera_key_plan(camera_config)
-            expected_color_keys = [
-                entry["color_key"] for entry in camera_key_plan
-            ]
-            expected_depth_keys = [
-                entry["depth_key"]
-                for entry in camera_key_plan
-                if entry["depth_key"]
-            ]
             output_root = Path(args.task_dir).expanduser().resolve() / args.task_name
-            episode_writer = LeRobotEpisodeWriter(
-                root=output_root / "lerobot",
-                repo_id=args.lerobot_repo_id
-                or default_repo_id(args.task_name),
-                fps=args.frequency,
-                task=args.task_goal or args.task_name,
-                robot_type="TOPSTAR_H1_MUJOCO_IK",
-                tolerance_s=args.sync_tolerance_s,
-                use_videos=True,
-                expected_color_keys=expected_color_keys,
-                expected_depth_keys=expected_depth_keys,
-                vcodec=args.video_codec,
-            )
-            image_shape = (camera_config.get("head_camera") or {}).get(
-                "image_shape", [480, 640]
-            )
-            if len(image_shape) < 2:
-                image_shape = [480, 640]
-            legacy_episode_writer = EpisodeWriter(
-                task_dir=str(output_root),
-                task_goal=args.task_goal,
-                task_desc=args.task_desc,
-                task_steps=args.task_steps,
-                frequency=args.frequency,
-                image_size=[int(image_shape[1]), int(image_shape[0])],
-                rerun_log=not args.no_rerun,
-                tolerance_s=args.sync_tolerance_s,
-            )
             raw_writer = (
                 RawSessionWriter(
                     output_root,
@@ -1451,23 +1632,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 image_client=image_client,
                 camera_config=camera_config,
                 camera_key_plan=camera_key_plan,
-                episode_writer=episode_writer,
-                recorder_cls=Recorder,
+                legacy_episode_writer=None,
                 output_root=output_root,
                 task_name=args.task_name,
                 task_description=args.task_desc,
                 frequency=args.frequency,
                 sync_tolerance_s=args.sync_tolerance_s,
                 camera_sync_tolerance_s=args.camera_sync_tolerance_s,
-                legacy_episode_writer=legacy_episode_writer,
                 raw_writer=raw_writer,
                 max_camera_age_s=args.max_camera_age_s,
             )
-            LOG.info("Recording ready: %s", output_root)
+            LOG.info(
+                "Recording ready (raw-only online; no ServoJ JSON): "
+                "%s; legacy images and LeRobot are generated offline",
+                output_root,
+            )
+            LOG.info(
+                "Offline finalize: python -m teleop.utils.finalize_raw_dataset "
+                "--task-dir %s",
+                output_root,
+            )
 
         tv_wrapper = _start_televuer()
         LOG.info("Open https://<this-computer-ip>:8012 in Pico")
-        LOG.info("Left A: arm/disarm both arms; Right A: disarm; Ctrl-C: exit")
+        LOG.info(
+            "Left A: arm/disarm both arms; "
+            "Right A: lock/unlock rigid box grasp; Ctrl-C: exit"
+        )
         if controller_mapping == "mirrored":
             LOG.warning(
                 "MIRRORED mapping: Pico left controls robot right; "
@@ -1526,12 +1717,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if hasattr(controller, "wait_for_hold_expire"):
                     controller.wait_for_hold_expire(timeout=10.0)
                 current_q, current_dq, state_receive_ns = (
-                    _read_robot_arm_state(controller)
+                    _wait_for_fresh_robot_arm_state(
+                        controller,
+                        freshness_timeout_s=args.state_timeout,
+                        wait_timeout_s=(
+                            args.legacy_stale_state_hard_timeout
+                            if args.legacy_stale_state_behavior
+                            else max(1.0, args.state_timeout * 2.0)
+                        ),
+                    )
                 )
-                if not monotonic_timestamp_is_fresh(
-                    state_receive_ns, args.state_timeout
-                ):
-                    raise LiveSafetyError("/lowstate is stale after go_home()")
                 current_q, current_dq = _validate_robot_arm_state(
                     solver, current_q, current_dq
                 )
@@ -1577,19 +1772,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                     measured_q, measured_dq, state_receive_ns = (
                         _read_robot_arm_state(controller)
                     )
-                    if not monotonic_timestamp_is_fresh(
+                    state_is_fresh = monotonic_timestamp_is_fresh(
                         state_receive_ns,
                         args.state_timeout,
                         now_ns=time.monotonic_ns(),
-                    ):
-                        raise LiveSafetyError(
-                            "/lowstate is stale or missing"
-                        )
-                    measured_q, measured_dq = _validate_robot_arm_state(
-                        solver,
-                        measured_q,
-                        measured_dq,
                     )
+                    if state_is_fresh:
+                        measured_q, measured_dq = _validate_robot_arm_state(
+                            solver,
+                            measured_q,
+                            measured_dq,
+                        )
+                        last_valid_q = measured_q.copy()
+                        last_valid_state_receive_ns = state_receive_ns
+                    else:
+                        state_age_s = (
+                            time.monotonic_ns() - int(state_receive_ns or 0)
+                        ) / 1_000_000_000.0
+                        can_reuse_legacy_state = (
+                            args.legacy_stale_state_behavior
+                            and last_valid_q is not None
+                            and state_receive_ns > 0
+                            and 0.0 <= state_age_s
+                            <= args.legacy_stale_state_hard_timeout
+                        )
+                        if not can_reuse_legacy_state:
+                            raise LiveSafetyError(
+                                "/lowstate is stale or missing"
+                            )
+                        measured_q = last_valid_q.copy()
+                        measured_dq = np.zeros(H1_ARM_DOF, dtype=np.float64)
+                        if now - last_invalid_state_log >= 1.0:
+                            last_invalid_state_log = now
+                            LOG.warning(
+                                "LEGACY stale-state fallback: reusing the last "
+                                "valid arm state (age %.3f s)",
+                                state_age_s,
+                            )
                 except Exception as exc:
                     if core.active:
                         core.disarm()
@@ -1613,8 +1832,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     continue
                 current_q = measured_q
                 current_dq = measured_dq
-                last_valid_q = current_q.copy()
-                last_valid_state_receive_ns = state_receive_ns
 
             if mujoco_viewer is not None:
                 if not mujoco_viewer.is_running():
@@ -1701,18 +1918,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                     LOG.info("Left Grip HOME completed")
                 continue
 
-            if right_a_rising and core.active:
-                core.disarm()
-                reference_settle_deadline = 0.0
-                if controller is not None:
-                    _send_robot_hold(controller, solver, current_q)
-                LOG.warning("DISARMED by Right A; holding measured pose")
-                if recording_session is not None and recording_session.active:
-                    try:
-                        recording_session.stop()
-                        LOG.info("Recording saved after disarm")
-                    except Exception:
-                        LOG.exception("failed to save recording after disarm")
+            if right_a_rising:
+                if not core.active:
+                    LOG.warning("Right A box lock ignored: arm teleoperation is not active")
+                    continue
+                if now < reference_settle_deadline:
+                    LOG.warning(
+                        "Right A box lock ignored: wrist references are still stabilizing"
+                    )
+                    continue
+                max_toggle_speed = float(np.max(np.abs(current_dq)))
+                if max_toggle_speed > 0.75:
+                    LOG.warning(
+                        "Right A box lock ignored: max measured |dq| %.3f rad/s "
+                        "exceeds 0.750 rad/s",
+                        max_toggle_speed,
+                    )
+                    continue
+                try:
+                    locked, lock_width = core.toggle_dual_object_lock(
+                        current_q,
+                        left_wrist_pose,
+                        right_wrist_pose,
+                        now_s=now,
+                    )
+                    if controller is not None and hasattr(
+                        controller, "reset_arm_command_reference"
+                    ):
+                        controller.reset_arm_command_reference(current_q)
+                    if locked:
+                        LOG.warning(
+                            "BOX GRASP LOCKED by Right A: measured width %.3f m",
+                            lock_width,
+                        )
+                    else:
+                        LOG.warning(
+                            "BOX GRASP UNLOCKED by Right A: independent arm references recaptured"
+                        )
+                except (LiveSafetyError, ValueError) as exc:
+                    LOG.error("Right A box lock rejected: %s", exc)
                 continue
 
             if left_a_rising:

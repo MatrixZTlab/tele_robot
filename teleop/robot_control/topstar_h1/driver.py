@@ -101,7 +101,10 @@ class H1RobotDriver(RobotDriver):
     def _on_step_done(self, ik_result, tele_data):
         """每帧执行 EE handler 事件分发（边缘检测 + 回调）。"""
         if self.handler_registry.count > 0:
-            swap = getattr(tele_data, 'teleop_mode', 'relative_head') == 'relative_pose'
+            swap = (
+                getattr(tele_data, 'teleop_mode', 'relative_head') == 'relative_pose'
+                and getattr(tele_data, 'controller_mapping', 'mirrored') == 'mirrored'
+            )
             self._prev_ee_state = self.handler_registry.dispatch_trigger_squeeze(
                 tele_data, self._prev_ee_state, swap_sides=swap,
             )

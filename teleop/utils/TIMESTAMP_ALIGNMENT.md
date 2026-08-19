@@ -3,6 +3,38 @@
 The control loop remains latest-frame and non-blocking. Recording also writes
 independent raw streams, which are aligned offline before LeRobot export.
 
+## Current alignment contract (v2)
+
+The offline aligner uses a true fixed-rate target grid. A camera frame is
+matched *to* a 20 Hz grid timestamp; its jittered capture timestamp never
+replaces that target timestamp. Invalid frames are therefore not silently
+renumbered into a shorter, apparently continuous trajectory.
+
+Short acquisition gaps are handled without changing the 20 Hz timeline. A
+nearby camera frame may be held for at most 75 ms and two consecutive grid
+targets; LowState may be interpolated only across at most 150 ms; LowCmd may be
+held for at most 150 ms. Every such frame is marked with `alignment.imputed`
+and named `imputation_reasons`. The default quality gate allows at most 10%
+imputed frames and 5% missing source sequence numbers.
+
+Those are bounded recovery rules, not silent repair. A longer gap remains
+invalid. The default `--gap-policy trim-edges` may remove an incomplete prefix
+or suffix, but rejects a remaining invalid run inside an episode.
+`--gap-policy compress` exists only for inspecting legacy data and must not be
+used for formal long-horizon training.
+
+Pico poses are diagnostic metadata by default. Add `--require-pico` only when a
+downstream model actually consumes Pico data. RGB, LowState, and the published
+LowCmd remain required training streams.
+
+Action pairing is explicit: `--action-match` selects `latest-before`, `nearest`,
+or `first-after`; `--action-offset-ms` applies a calibrated observation-to-action
+offset before matching. Keep the offset at `0` until it has been measured.
+
+The raw writer records queue delay, ignores duplicate camera packets, and starts
+a new writer epoch when a camera sequence counter resets. This prevents a
+restarted camera from overwriting an earlier JPEG with the same sequence number.
+
 ## 1. Install and configure Chrony
 
 `chronyc` is provided by the Ubuntu `chrony` package. Install it on both the
@@ -138,16 +170,23 @@ PYTHONPATH=. python teleop/utils/align_raw_session.py \
   --reference-camera head_camera \
   --fps 20 \
   --max-camera-error-ms 20 \
+  --max-camera-hold-ms 75 \
+  --max-camera-hold-frames 2 \
   --max-state-gap-ms 60 \
+  --max-state-interpolation-gap-ms 150 \
   --max-pico-gap-ms 50 \
   --max-action-age-ms 100 \
+  --max-action-hold-ms 150 \
+  --max-imputed-ratio 0.10 \
+  --max-sequence-missing-ratio 0.05 \
   --overwrite
 ```
 
-These values do not change the raw data or robot control. They only decide
-whether interpolation around a 20 Hz output timestamp is accepted. Do not use
-the practical profile for fast contact/collision tasks without adding a
-publisher-side LowState timestamp.
+The `*-error/gap/age` values are the native-sample targets; the corresponding
+`*-hold/interpolation` values are hard recovery bounds. Values between them are
+kept but explicitly counted as imputed. These settings do not change raw data
+or robot control. Do not use this practical profile for fast contact/collision
+tasks without adding a publisher-side LowState timestamp.
 
 Optional measured camera latency can be subtracted before matching:
 
@@ -185,3 +224,36 @@ PYTHONPATH=. python teleop/utils/export_lerobot_dataset.py \
 
 Review `alignment_report.json` before training. Do not export an episode whose
 clock check failed or whose invalid/missing frame rate is unexpectedly high.
+
+## 7. Finalize a complete task directory
+
+The MuJoCo incremental live teleop intentionally records only asynchronous raw
+streams plus the background legacy episode while the robot is moving. It does
+not call `LeRobotDataset.add_frame()` in the control loop. After collection,
+batch-align every raw episode, write an aggregate quality report, and optionally
+export the accepted aligned set to LeRobot:
+
+```bash
+cd /home/ai/lium/tele_robot
+PYTHONPATH=. python -m teleop.utils.finalize_raw_dataset \
+  --task-dir teleop/utils/data/topstar_h1_box_new_004
+```
+
+This writes:
+
+```text
+topstar_h1_box_new_004/aligned/episode_XXXX/
+topstar_h1_box_new_004/offline_quality_summary.json
+```
+
+Only request LeRobot export after reviewing the report:
+
+```bash
+PYTHONPATH=. python -m teleop.utils.finalize_raw_dataset \
+  --task-dir teleop/utils/data/topstar_h1_box_new_004 \
+  --export-lerobot \
+  --video-codec h264
+```
+
+The exporter refuses episodes whose alignment report fails its quality gate;
+do not bypass that refusal without reviewing the named episode and failure.

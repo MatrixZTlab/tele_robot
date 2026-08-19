@@ -45,6 +45,7 @@ import ssl
 from pathlib import Path
 import queue
 import fractions
+import uuid
 from typing import Dict, Optional, Tuple, Any
 
 
@@ -1039,6 +1040,10 @@ class OrbbecCamera(BaseCamera):
                 "    pip install pyorbbec\n"
             )
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        # Sequence counters restart when a camera process is recreated.  Pair
+        # every sequence with a process-unique stream id so offline recording
+        # can distinguish a restart from a duplicate packet.
+        self._stream_session_id = uuid.uuid4().hex
         self._serial_number = serial_number
         self._enable_depth = enable_depth
         self._latest_depth = None
@@ -1127,6 +1132,7 @@ class OrbbecCamera(BaseCamera):
                     "type": "rgb",
                     # Backward-compatible approximate source timestamp.
                     "timestamp_ns": receive_wall_ns,
+                    "stream_session_id": self._stream_session_id,
                     "sequence": self._frame_sequence,
                     "device_frame_index": device_frame_index,
                     "device_timestamp_raw": device_timestamp_raw,

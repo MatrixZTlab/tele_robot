@@ -139,41 +139,68 @@ class RobotDriver(ABC):
         elif teleop_mode == "relative_pose":
             # ── 相对位姿管线：FK → 相似变换 → IK ──
             left_ee, right_ee = self._get_current_ee_poses(current_q)
-
-            # ── 镜像映射：左手数据 → 右臂，右手数据 → 左臂 ──
             l_ref = getattr(tele_data, 'left_wrist_ref', None)
-            if l_ref is not None:
-                if self._init_right_ee is None:   # 首次或重新激活时捕获
-                    self._init_right_ee = right_ee.copy()
-                    print(f"[REL_POSE] init_right_ee captured from FK (pos={right_ee[:3,3]})")
-                right_target = self.xr_transformer.transform_relative_pose(
-                    tele_data.left_wrist_pose, l_ref,
-                    self._init_right_ee,
-                    arm_scale=self.arm_scale,
-                    translation_axis_sign=(1.0, -1.0, 1.0),
-                )
-            else:
-                right_target = right_ee
-                if self._init_right_ee is not None:
-                    print("[REL_POSE] left_wrist_ref cleared, init_right_ee reset")
-                self._init_right_ee = None
-
             r_ref = getattr(tele_data, 'right_wrist_ref', None)
-            if r_ref is not None:
-                if self._init_left_ee is None:   # 首次或重新激活时捕获
+            mirrored = getattr(tele_data, 'controller_mapping', 'mirrored') == 'mirrored'
+
+            if mirrored:
+                left_wrist_pose, left_ref = tele_data.right_wrist_pose, r_ref
+                right_wrist_pose, right_ref = tele_data.left_wrist_pose, l_ref
+                translation_axis_sign = (1.0, -1.0, 1.0)
+            else:
+                left_wrist_pose, left_ref = tele_data.left_wrist_pose, l_ref
+                right_wrist_pose, right_ref = tele_data.right_wrist_pose, r_ref
+                translation_axis_sign = (1.0, 1.0, 1.0)
+
+            if left_ref is not None:
+                if self._init_left_ee is None:
                     self._init_left_ee = left_ee.copy()
-                    print(f"[REL_POSE] init_left_ee captured from FK (pos={left_ee[:3,3]})")
                 left_target = self.xr_transformer.transform_relative_pose(
-                    tele_data.right_wrist_pose, r_ref,
-                    self._init_left_ee,
+                    left_wrist_pose, left_ref, self._init_left_ee,
                     arm_scale=self.arm_scale,
-                    translation_axis_sign=(1.0, -1.0, 1.0),
+                    translation_axis_sign=translation_axis_sign,
                 )
             else:
                 left_target = left_ee
-                if self._init_left_ee is not None:
-                    print("[REL_POSE] right_wrist_ref cleared, init_left_ee reset")
                 self._init_left_ee = None
+
+            if right_ref is not None:
+                if self._init_right_ee is None:
+                    self._init_right_ee = right_ee.copy()
+                right_target = self.xr_transformer.transform_relative_pose(
+                    right_wrist_pose, right_ref, self._init_right_ee,
+                    arm_scale=self.arm_scale,
+                    translation_axis_sign=translation_axis_sign,
+                )
+            else:
+                right_target = right_ee
+                self._init_right_ee = None
+
+            # Locked mode ignores Pico wrist rotation.  The activation-time FK
+            # rotations are retained while translation remains incremental.
+            if getattr(tele_data, 'orientation_control', 'vr') == 'locked':
+                if left_ref is not None:
+                    left_target[:3, :3] = self._init_left_ee[:3, :3]
+                if right_ref is not None:
+                    right_target[:3, :3] = self._init_right_ee[:3, :3]
+
+            # Apply the same rigid dual-arm object lock used by relative_head.
+            # Here the inputs are already robot-frame incremental targets, so
+            # wrapping them avoids re-running the absolute XR transform.
+            relative_xr = XRProcessedData(
+                left_wrist_pose=left_target,
+                right_wrist_pose=right_target,
+                head_kwargs={},
+            )
+            relative_xr = self._apply_dual_object_control(
+                relative_xr,
+                current_q,
+                current_dq,
+                state_receive_ns,
+                teleop_mode,
+            )
+            left_target = relative_xr.left_wrist_pose
+            right_target = relative_xr.right_wrist_pose
 
             # relative_pose 模式不做头部 IK
             transform_done = time.perf_counter_ns()
@@ -184,10 +211,10 @@ class RobotDriver(ABC):
             )
 
             # ── 未激活臂绕过 IK + 滤波，直接用当前关节角保持原位 ──
-            if r_ref is None:
+            if left_ref is None:
                 ik_result.arm_q[:7] = current_q[:7]
                 ik_result.arm_tau[:7] = np.zeros(7)
-            if l_ref is None:
+            if right_ref is None:
                 ik_result.arm_q[7:14] = current_q[7:14]
                 ik_result.arm_tau[7:14] = np.zeros(7)
 
@@ -277,8 +304,11 @@ class RobotDriver(ABC):
         now_s = time.monotonic()
         if self._dual_object_toggle_requested:
             self._dual_object_toggle_requested = False
-            if teleop_mode != "relative_head":
-                logger.warning("Dual-object lock requires relative_head mode")
+            if teleop_mode not in {"relative_head", "relative_pose"}:
+                logger.warning(
+                    "Dual-object lock is unavailable in teleop mode %s",
+                    teleop_mode,
+                )
             else:
                 actual_poses = self._validate_dual_object_transition(
                     current_q, current_dq, state_receive_ns

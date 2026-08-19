@@ -126,6 +126,27 @@ class VRRelativePoseTrackerTest(unittest.TestCase):
             target[:3, :3], _rotz(np.pi / 2) @ ee0[:3, :3], atol=1e-7
         )
 
+    def test_locked_orientation_ignores_wrist_rotation_but_keeps_translation(self):
+        ee0 = self.ee0.copy()
+        ee0[:3, :3] = _rotz(-np.pi / 4)
+        tracker = VRRelativePoseTracker(
+            ee0,
+            np.eye(3),
+            position_scale=1.0,
+            ema_alpha=1.0,
+            lock_orientation=True,
+        )
+        tracker.update(np.eye(4))
+        wrist = np.eye(4)
+        wrist[:3, :3] = _rotz(np.pi / 2)
+        wrist[0, 3] = 0.1
+
+        target = tracker.update(wrist)
+
+        np.testing.assert_allclose(target[:3, :3], ee0[:3, :3], atol=1e-9)
+        np.testing.assert_allclose(target[:3, 3], ee0[:3, 3] + [0.1, 0.0, 0.0])
+        np.testing.assert_allclose(tracker.rotation_residual, np.eye(3))
+
     def test_position_deadband_zeros_small_residual(self):
         tracker = VRRelativePoseTracker(
             self.ee0, np.eye(3), position_deadband=0.02

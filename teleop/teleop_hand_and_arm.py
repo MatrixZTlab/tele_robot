@@ -15,6 +15,7 @@ logger_mp = logging_mp.getLogger(__name__)
 
 import os 
 import sys
+from pathlib import Path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
@@ -31,8 +32,6 @@ from teleop.robot_control.topstar_h1.joint_convention import (
 )
 from teleimager.image_client import ImageClient
 from teleop.utils.ipc import IPC_Server
-from teleop.utils.record import Recorder, RecorderManager
-from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.raw_session_writer import RawSessionWriter
 import queue as _queue
 from sshkeyboard import listen_keyboard, stop_listening
@@ -107,6 +106,8 @@ RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
 RECORD_DISCARD = False  # Discard current/latest recording
 LAST_RECORD_EPISODE_ID = None  # Latest episode created during this process
+CURRENT_RECORD_EPISODE_ID = None
+NEXT_RECORD_EPISODE_ID = 0
 SERVO_TOGGLE = False  # Toggle ServoJ recording (press 'v' to toggle)
 _home_left_squeeze_armed = False  # Require one release after teleop stops.
 
@@ -422,8 +423,9 @@ def _consume_right_a_press(tele_data) -> bool:
 
 
 def _process_home_squeeze(tele_data) -> bool:
-    """Return both arms home on one left-grip press while teleop is stopped."""
+    """Save recording, disarm teleop, then return home on Left Grip."""
     global _home_left_squeeze_armed
+    global TELEOP_ACTIVE, LEFT_ARM_ACTIVE, RIGHT_ARM_ACTIVE, RECORD_TOGGLE
 
     squeeze_value = float(getattr(tele_data, 'left_ctrl_squeezeValue', 0.0) or 0.0)
     pressed = bool(getattr(tele_data, 'left_ctrl_squeeze', False)) or squeeze_value > 0.5
@@ -435,13 +437,22 @@ def _process_home_squeeze(tele_data) -> bool:
 
     # Consume this press even when rejected; another attempt requires release.
     _home_left_squeeze_armed = False
-    if TELEOP_ACTIVE:
-        return False
     if RECORD_RUNNING:
-        logger_mp.warning(
-            "Left Grip HOME ignored: stop the active recording with Left Y first"
-        )
-        return False
+        logger_mp.warning("Left Grip: saving the active episode before HOME")
+        RECORD_TOGGLE = True
+        _process_record_requests()
+
+    if TELEOP_ACTIVE or LEFT_ARM_ACTIVE or RIGHT_ARM_ACTIVE:
+        TELEOP_ACTIVE = False
+        LEFT_ARM_ACTIVE = False
+        RIGHT_ARM_ACTIVE = False
+        try:
+            tv_wrapper.reset_left_wrist_ref()
+            tv_wrapper.reset_right_wrist_ref()
+        except Exception:
+            pass
+        robot.reset_relative_pose_state('both')
+        logger_mp.warning("Left Grip: arm teleoperation DISARMED before HOME")
 
     try:
         robot.reset_dual_object_control()
@@ -465,17 +476,17 @@ def _process_home_squeeze(tele_data) -> bool:
 
 
 def _process_record_requests():
-    """Apply start/save/discard requests from keyboard or XR buttons."""
+    """Apply raw-only start/save/discard requests from keyboard or XR."""
     global READY, RECORD_RUNNING, RECORD_TOGGLE, RECORD_DISCARD
-    global LAST_RECORD_EPISODE_ID
+    global LAST_RECORD_EPISODE_ID, CURRENT_RECORD_EPISODE_ID
+    global NEXT_RECORD_EPISODE_ID
 
     if not args.record:
         return
 
-    writer = globals().get("episode_writer")
     raw = globals().get("raw_writer")
-    if writer is None:
-        logger_mp.error("Recording request ignored: episode writer is unavailable")
+    if raw is None:
+        logger_mp.error("Recording request ignored: raw writer is unavailable")
         RECORD_TOGGLE = False
         RECORD_DISCARD = False
         return
@@ -483,107 +494,143 @@ def _process_record_requests():
     if RECORD_DISCARD:
         RECORD_DISCARD = False
         RECORD_TOGGLE = False
-        episode_id = LAST_RECORD_EPISODE_ID
+        episode_id = (
+            CURRENT_RECORD_EPISODE_ID
+            if RECORD_RUNNING else LAST_RECORD_EPISODE_ID
+        )
         if episode_id is None:
             logger_mp.warning(
                 "XR Right B: no episode recorded during this run is available "
                 "to discard"
             )
         else:
-            was_recording = RECORD_RUNNING
             RECORD_RUNNING = False
-            raw_dir = None
-            raw_error = None
-            if raw is not None:
-                try:
-                    raw_dir = raw.discard_episode(episode_id)
-                except Exception as exc:
-                    raw_error = exc
-                    logger_mp.exception(
-                        "Failed to discard raw episode_%04d", episode_id
-                    )
-
-            if raw_error is not None:
-                # Preserve the online copy when raw deletion fails so the two
-                # representations cannot silently diverge.
-                if was_recording:
-                    writer.save_episode()
-                LAST_RECORD_EPISODE_ID = None
-                logger_mp.error(
-                    "XR Right B: discard aborted for episode_%04d; online data "
-                    "was retained because raw cleanup failed: %s",
-                    episode_id,
-                    raw_error,
+            try:
+                raw_dir = raw.discard_episode(episode_id)
+            except Exception:
+                logger_mp.exception(
+                    "Failed to discard raw episode_%04d", episode_id
                 )
             else:
-                try:
-                    episode_dir = writer.discard_episode(episode_id)
-                except Exception:
-                    episode_dir = None
-                    logger_mp.exception(
-                        "Failed to discard online episode_%04d", episode_id
-                    )
-                LAST_RECORD_EPISODE_ID = None
-                if episode_dir is None and raw_dir is None:
-                    logger_mp.warning(
-                        "XR Right B: episode_%04d was already absent", episode_id
-                    )
-                else:
-                    logger_mp.warning(
-                        "XR Right B: DISCARDING episode_%04d "
-                        "(online=%s, raw=%s)",
-                        episode_id,
-                        episode_dir,
-                        raw_dir,
-                    )
-        READY = writer.is_ready()
+                logger_mp.warning(
+                    "XR Right B: raw episode_%04d discarded (%s)",
+                    episode_id,
+                    raw_dir,
+                )
+            CURRENT_RECORD_EPISODE_ID = None
+            LAST_RECORD_EPISODE_ID = None
+        READY = True
         return
 
     if RECORD_TOGGLE:
         RECORD_TOGGLE = False
         if not RECORD_RUNNING:
-            if writer.create_episode():
-                LAST_RECORD_EPISODE_ID = writer.episode_id
-                if raw is not None:
-                    raw.start_episode(
-                        writer.episode_id,
-                        metadata={
-                            'task_name': args.task_name,
-                            'task_goal': args.task_goal,
-                            'frequency_hz': args.frequency,
-                            'robot': args.robot,
-                            'control_mode': args.control_mode,
-                            'input_mode': args.input_mode,
-                            'image_server_ip': args.img_server_ip,
-                            'camera_config': camera_config,
-                            **(
-                                {
-                                    'robot_model_revision': H1_MODEL_REVISION,
-                                    'arm_coordinate_convention': (
-                                        H1_ARM_COORDINATE_CONVENTION
-                                    ),
-                                }
-                                if args.robot == 'TOPSTAR_H1'
-                                else {}
-                            ),
-                        },
-                    )
+            missing_cameras = _missing_raw_camera_frames()
+            if missing_cameras:
+                logger_mp.error(
+                    "Recording not started; missing compressed camera frames: %s",
+                    ", ".join(missing_cameras),
+                )
+                READY = True
+                return
+            episode_id = int(NEXT_RECORD_EPISODE_ID)
+            try:
+                raw.start_episode(
+                    episode_id,
+                    metadata={
+                        'task_name': args.task_name,
+                        'task_goal': args.task_goal,
+                        'task_description': args.task_desc,
+                        'frequency_hz': args.frequency,
+                        'robot': args.robot,
+                        'control_mode': args.control_mode,
+                        'teleop_mode': TELEOP_MODE,
+                        'controller_mapping': args.controller_mapping,
+                        'orientation_control': args.orientation_control,
+                        'input_mode': args.input_mode,
+                        'image_server_ip': args.img_server_ip,
+                        'camera_config': camera_config,
+                        'recording_pipeline': 'legacy_control_raw_only_v1',
+                        **(
+                            {
+                                'robot_model_revision': H1_MODEL_REVISION,
+                                'arm_coordinate_convention': (
+                                    H1_ARM_COORDINATE_CONVENTION
+                                ),
+                            }
+                            if args.robot == 'TOPSTAR_H1'
+                            else {}
+                        ),
+                    },
+                )
+            except Exception:
+                logger_mp.exception(
+                    "Failed to start raw episode_%04d", episode_id
+                )
+            else:
+                CURRENT_RECORD_EPISODE_ID = episode_id
+                NEXT_RECORD_EPISODE_ID = episode_id + 1
                 RECORD_RUNNING = True
                 READY = False
-                logger_mp.info("XR Left Y: dataset recording STARTED")
-            else:
-                logger_mp.error("Failed to create episode; recording not started")
+                logger_mp.info(
+                    "XR Left Y: raw-only recording STARTED (episode_%04d)",
+                    episode_id,
+                )
         else:
-            RECORD_RUNNING = False
-            if raw is not None:
+            episode_id = CURRENT_RECORD_EPISODE_ID
+            try:
                 raw_dir = raw.stop_episode()
-                logger_mp.info("Raw streams flushed: %s", raw_dir)
-            writer.save_episode()
+            except Exception:
+                logger_mp.exception(
+                    "Failed to save raw episode_%04d", episode_id
+                )
+                raise
+            RECORD_RUNNING = False
+            CURRENT_RECORD_EPISODE_ID = None
+            LAST_RECORD_EPISODE_ID = episode_id
+            READY = True
             logger_mp.info(
-                "XR Left Y: dataset recording STOPPED; episode is being saved"
+                "XR Left Y: raw episode_%04d SAVED (%s)",
+                episode_id,
+                raw_dir,
             )
 
-    READY = writer.is_ready()
+
+def _next_raw_episode_index(task_path):
+    """Return the next unused raw episode id across repeated launches."""
+    raw_root = Path(task_path).expanduser().resolve() / "raw"
+    indices = []
+    if raw_root.exists():
+        for path in raw_root.glob("episode_*"):
+            try:
+                indices.append(int(path.name.rsplit("_", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+    return max(indices, default=-1) + 1
+
+
+def _missing_raw_camera_frames():
+    """Return enabled ZMQ cameras that have no compressed frame yet."""
+    client = globals().get("img_client")
+    config = globals().get("camera_config") or {}
+    if client is None:
+        return ["image_client"]
+    missing = []
+    getters = {
+        "head_camera": "get_head_frame",
+        "left_wrist_camera": "get_left_wrist_frame",
+        "right_wrist_camera": "get_right_wrist_frame",
+    }
+    for camera_name, getter_name in getters.items():
+        if not config.get(camera_name, {}).get("enable_zmq", False):
+            continue
+        try:
+            image = getattr(client, getter_name)()
+        except Exception:
+            image = None
+        if image is None or not getattr(image, "jpg", None):
+            missing.append(camera_name)
+    return missing
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -591,6 +638,24 @@ if __name__ == '__main__':
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
     parser.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand', help='Select XR device input tracking source')
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
+    parser.add_argument(
+        '--controller-mapping',
+        choices=('same-side', 'mirrored'),
+        default='mirrored',
+        help=(
+            'relative_pose controller mapping: same-side maps Pico left/right '
+            'to robot left/right; mirrored swaps arms and reverses lateral motion'
+        ),
+    )
+    parser.add_argument(
+        '--orientation-control',
+        choices=('vr', 'locked'),
+        default='vr',
+        help=(
+            'relative_pose orientation control: vr follows wrist rotation; '
+            'locked keeps the end-effector orientation captured at activation'
+        ),
+    )
     parser.add_argument('--robot', type=str, default='TOPSTAR_H1', help='Robot model (e.g. TOPSTAR_H1, TOPSTAR_H2)')
     parser.add_argument('--control-mode', type=str, default='arms_head',
                         choices=['arms_only', 'arms_head', 'arms_head_torso', 'full_body'],
@@ -667,6 +732,11 @@ if __name__ == '__main__':
                         help='Maximum LowState age after robot.step for alignment metadata')
 
     args = parser.parse_args()
+    if args.record and not args.raw_record:
+        parser.error(
+            "--record now uses the raw-only asynchronous pipeline; "
+            "remove --no-raw-record"
+        )
     logger_mp.info(f"args: {args}")
 
     try:
@@ -739,7 +809,10 @@ if __name__ == '__main__':
             logger_mp.info("🖥️  Headless mode — no image server, using defaults")
             args.display_mode = 'pass-through'  # headless 无需沉浸模式
         else:
-            img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+            img_client = ImageClient(
+                host=args.img_server_ip,
+                request_bgr=args.display_mode != 'pass-through',
+            )
             camera_config = img_client.get_cam_config()
             logger_mp.debug(f"Camera config: {camera_config}")
         xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
@@ -793,98 +866,40 @@ if __name__ == '__main__':
         if args.motion:
             _base_last_t = time.monotonic()
 
-        # record + headless / non-headless mode
+        # Raw-only asynchronous recording. Camera packets are saved by the
+        # writer thread directly from ImageClient listeners; the control loop
+        # never decodes or writes recording images.
+        episode_writer = None
+        recorder_manager = None
         if args.record:
-            raw_writer = None
-            # trajectory recorder + manager: samples arm joint states and writes trajectory JSON
-            try:
-                recorder = Recorder(buffer_size=1000)
-
-                # Build EE action getter for suction_cup
-                ee_action_getter = None
-                if args.ee == "suction_cup" and hasattr(arm_ctrl, '_ee_gripper_state'):
-                    def _get_suction_cup_ee_action():
-                        state = getattr(arm_ctrl, '_ee_gripper_state', [0.0, 0.0])
-                        return list(state) if state else [0.0, 0.0]
-                    ee_action_getter = _get_suction_cup_ee_action
-
-                recorder_manager = RecorderManager(
-                    recorder, arm_ctrl,
-                    ik=arm_ik if 'arm_ik' in globals() else None,
-                    frequency=args.frequency,
-                    ee_type=args.ee,
-                    ee_action_getter=ee_action_getter,
-                    control_mode=control_mode,
-                    robot_model=robot.config.model_name,
-                    robot_model_revision=(
-                        H1_MODEL_REVISION
-                        if args.robot.upper() == 'TOPSTAR_H1' else None
-                    ),
-                    arm_coordinate_convention=(
-                        H1_ARM_COORDINATE_CONVENTION
-                        if args.robot.upper() == 'TOPSTAR_H1' else None
-                    ),
-                )
-                recorder_manager.start()
-            except Exception:
-                logger_mp.exception('Failed to initialize trajectory recorder')
-
-            # Match Unitree xr_teleoperate recording: each episode is written as
-            # episode_XXXX/{colors,depths,data.json}. Conversion to LeRobot is a
-            # separate offline step, so recording never depends on video encoding.
-            try:
-                if args.no_rerun:
-                    logger_mp.info(
-                        "Live Rerun visualization disabled; camera recording remains enabled"
+            if img_client is None:
+                raise RuntimeError("raw recording requires the image client")
+            task_path = os.path.join(args.task_dir, args.task_name)
+            raw_writer = RawSessionWriter(
+                task_path,
+                queue_size=args.raw_record_queue_size,
+            )
+            for camera_name in (
+                'head_camera', 'left_wrist_camera', 'right_wrist_camera'
+            ):
+                if camera_config.get(camera_name, {}).get('enable_zmq', False):
+                    img_client.add_packet_listener(
+                        camera_name, raw_writer.append_camera_packet
                     )
-                image_height, image_width = camera_config['head_camera']['image_shape']
-                episode_writer = EpisodeWriter(
-                    task_dir=os.path.join(args.task_dir, args.task_name),
-                    task_goal=args.task_goal,
-                    task_desc=args.task_desc,
-                    task_steps=args.task_steps,
-                    frequency=args.frequency,
-                    image_size=[image_width, image_height],
-                    rerun_log=not (args.headless or args.no_rerun),
-                )
-                if args.robot == 'TOPSTAR_H1':
-                    episode_writer.info["robot_model_revision"] = (
-                        H1_MODEL_REVISION
-                    )
-                    episode_writer.info["arm_coordinate_convention"] = (
-                        H1_ARM_COORDINATE_CONVENTION
-                    )
-                if _body_joystick_controller is not None:
-                    episode_writer.info["joint_names"]["body"] = [
-                        "Robot_Body_Movement_Joint",
-                        "Robot_Body_Rotation_Joint",
-                    ]
-            except Exception:
-                logger_mp.exception('Failed to initialize Unitree-style episode writer')
-
-            if args.raw_record:
-                try:
-                    task_path = os.path.join(args.task_dir, args.task_name)
-                    raw_writer = RawSessionWriter(
-                        task_path,
-                        queue_size=args.raw_record_queue_size,
-                    )
-                    if img_client is not None:
-                        for camera_name in (
-                            'head_camera', 'left_wrist_camera', 'right_wrist_camera'
-                        ):
-                            img_client.add_packet_listener(
-                                camera_name, raw_writer.append_camera_packet
-                            )
-                    if hasattr(arm_ctrl, 'set_raw_event_sink'):
-                        arm_ctrl.set_raw_event_sink(raw_writer.append_event)
-                    logger_mp.info(
-                        "Raw asynchronous recording enabled under %s/raw",
-                        task_path,
-                    )
-                except Exception:
-                    logger_mp.exception('Failed to initialize raw stream writer')
-                    raise
+            if hasattr(arm_ctrl, 'set_raw_event_sink'):
+                arm_ctrl.set_raw_event_sink(raw_writer.append_event)
+            NEXT_RECORD_EPISODE_ID = _next_raw_episode_index(task_path)
+            logger_mp.info(
+                "Recording ready (legacy control + raw-only async): %s; "
+                "next episode=%04d",
+                task_path,
+                NEXT_RECORD_EPISODE_ID,
+            )
+            logger_mp.info(
+                "Offline finalize: python -m teleop.utils.finalize_raw_dataset "
+                "--task-dir %s --export-lerobot",
+                task_path,
+            )
 
             def _drain_raw_xr_events():
                 if raw_writer is None:
@@ -1033,7 +1048,7 @@ if __name__ == '__main__':
                     )
                 else:
                     arm_ctrl.speed_instant_max()
-                    logger_mp.info("⚡ Replay mode: fast — dq_limit = 30 rad/s")
+                    logger_mp.info("⚡ Replay mode: fast — dq_limit = 10 rad/s")
 
                 # ── Stage 3/4: Execute trajectory replay ──
                 logger_mp.info("")
@@ -1149,7 +1164,10 @@ if __name__ == '__main__':
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
         logger_mp.info("📦  Right A: LOCK or UNLOCK rigid dual-arm object mode (relative_head only).")
-        logger_mp.info("🪞  Left A/X: toggle both mirrored arms together in relative_pose mode.")
+        logger_mp.info(
+            "Left A/X: toggle both arms together in relative_pose mode "
+            f"({args.controller_mapping} mapping)."
+        )
         if args.record:
             logger_mp.info("🟡  Left Y / [s]: START or SAVE recording.")
             logger_mp.info(
@@ -1158,7 +1176,12 @@ if __name__ == '__main__':
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
-        logger_mp.info("🏠  After stopping teleop, release then press Left Grip: HOME.")
+        logger_mp.info(
+            "Left Grip: save an active episode, disarm both arms, and return HOME."
+        )
+        logger_mp.info(
+            "Relative-pose orientation control: %s", args.orientation_control
+        )
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter TELEOP_ACTIVE state
         last_latency_profile_log = 0.0
@@ -1252,7 +1275,7 @@ if __name__ == '__main__':
                                 "Start teleop with Left A before using dual-object lock"
                             )
                     else:  # relative_pose
-                        # relative_pose: Left A/X activates both mirrored arms.
+                        # relative_pose: Left A/X activates both arms together.
                         if hasattr(tele_data, 'left_ctrl_aButton') and tele_data.left_ctrl_aButton:
                             if not getattr(tv_wrapper, '_prev_left_ctrl_aButton', False):
                                 try:
@@ -1265,8 +1288,8 @@ if __name__ == '__main__':
                                 TELEOP_ACTIVE = True
                                 robot.reset_relative_pose_state('both')
                                 logger_mp.info(
-                                    "XR Left A/X: both mirrored arms ACTIVATED "
-                                    "(left hand -> right arm, right hand -> left arm)"
+                                    "XR Left A/X: both arms ACTIVATED "
+                                    f"({args.controller_mapping} mapping)"
                                 )
                             tv_wrapper._prev_left_ctrl_aButton = True
                         else:
@@ -1296,7 +1319,10 @@ if __name__ == '__main__':
 
                     # ── 等待循环中响应 trigger/squeeze ──
                     if hasattr(robot, 'handler_registry') and robot.handler_registry.count > 0:
-                        swap = TELEOP_MODE == "relative_pose"
+                        swap = (
+                            TELEOP_MODE == "relative_pose"
+                            and args.controller_mapping == "mirrored"
+                        )
                         robot._prev_ee_state = robot.handler_registry.dispatch_trigger_squeeze(
                             tele_data, robot._prev_ee_state, swap_sides=swap,
                         )
@@ -1320,33 +1346,24 @@ if __name__ == '__main__':
                 start_time = time.time()
                 # get image
                 if camera_config['head_camera']['enable_zmq']:
-                    if (args.record or xr_need_local_img) and img_client is not None:
+                    if xr_need_local_img and img_client is not None:
                         head_img = img_client.get_head_frame()
                     if xr_need_local_img:
                         tv_wrapper.render_to_xr(head_img)
-                if args.record and img_client is not None:
-                    if camera_config.get('left_wrist_camera', {}).get('enable_zmq', False):
-                        left_wrist_img = img_client.get_left_wrist_frame()
-                    if camera_config.get('right_wrist_camera', {}).get('enable_zmq', False):
-                        right_wrist_img = img_client.get_right_wrist_frame()
 
-                # servo toggle (press 'v' to toggle ServoJ recording when recording)
+                # ServoJ JSON recording is intentionally absent from raw-only mode.
                 if args.record and SERVO_TOGGLE:
                     SERVO_TOGGLE = False
-                    if RECORD_RUNNING:
-                        try:
-                            if getattr(recorder_manager.recorder, '_servo_recording', False):
-                                recorder_manager.stop_servo_recording()
-                            else:
-                                recorder_manager.start_servo_recording()
-                        except Exception:
-                            logger_mp.exception('Failed to toggle servo recording')
-                    else:
-                        logger_mp.warning('ServoJ toggle ignored: not currently recording')
+                    logger_mp.warning(
+                        'ServoJ JSON is disabled in raw-only recording mode'
+                    )
 
                 # get xr's tele data
                 tele_data = tv_wrapper.get_tele_data()
                 _drain_raw_xr_events()
+
+                if _process_home_squeeze(tele_data):
+                    break
 
                 right_a_pressed = _consume_right_a_press(tele_data)
 
@@ -1380,7 +1397,7 @@ if __name__ == '__main__':
                             )
 
                 else:  # TELEOP_MODE == "relative_pose"
-                    # relative_pose: Left A/X toggles both mirrored arms together.
+                    # relative_pose: Left A/X toggles both arms together.
                     if hasattr(tele_data, 'left_ctrl_aButton') and tele_data.left_ctrl_aButton:
                         if not getattr(tv_wrapper, '_prev_left_ctrl_aButton', False):
                             if LEFT_ARM_ACTIVE or RIGHT_ARM_ACTIVE:
@@ -1389,7 +1406,10 @@ if __name__ == '__main__':
                                 tv_wrapper.reset_left_wrist_ref()
                                 tv_wrapper.reset_right_wrist_ref()
                                 robot.reset_relative_pose_state('both')
-                                logger_mp.info("XR Left A/X: both mirrored arms DEACTIVATED")
+                                logger_mp.info(
+                                    "XR Left A/X: both arms DEACTIVATED "
+                                    f"({args.controller_mapping} mapping)"
+                                )
                             else:
                                 try:
                                     tv_wrapper.capture_left_wrist_ref()
@@ -1400,8 +1420,8 @@ if __name__ == '__main__':
                                 RIGHT_ARM_ACTIVE = True
                                 robot.reset_relative_pose_state('both')
                                 logger_mp.info(
-                                    "XR Left A/X: both mirrored arms ACTIVATED "
-                                    "(left hand -> right arm, right hand -> left arm)"
+                                    "XR Left A/X: both arms ACTIVATED "
+                                    f"({args.controller_mapping} mapping)"
                                 )
                         tv_wrapper._prev_left_ctrl_aButton = True
                     else:
@@ -1410,12 +1430,20 @@ if __name__ == '__main__':
                     # Both flags move together, so teleop cannot enter a one-arm state.
                     TELEOP_ACTIVE = LEFT_ARM_ACTIVE or RIGHT_ARM_ACTIVE
 
+                    if right_a_pressed:
+                        if robot.request_dual_object_toggle():
+                            logger_mp.info(
+                                "XR Right A: dual-object lock toggle requested"
+                            )
+
                 if not TELEOP_ACTIVE:
                     robot.reset_dual_object_control()
                     break
 
                 # ── Pass teleop_mode to tele_data for RobotDriver ──
                 tele_data.teleop_mode = TELEOP_MODE
+                tele_data.controller_mapping = args.controller_mapping
+                tele_data.orientation_control = args.orientation_control
 
                 # Pico left Y starts or saves one dataset episode.
                 if args.record and hasattr(tele_data, 'left_ctrl_bButton') and tele_data.left_ctrl_bButton:
@@ -1459,6 +1487,14 @@ if __name__ == '__main__':
                 robot_step_done_timestamp_ns = time.time_ns()
                 robot_step_done_monotonic_ns = time.monotonic_ns()
                 if raw_writer is not None and raw_writer.active:
+                    measured_q = (
+                        recording_snapshot.get('left_arm_state', [])
+                        + recording_snapshot.get('right_arm_state', [])
+                    )
+                    command_q = (
+                        recording_snapshot.get('left_arm_action', [])
+                        + recording_snapshot.get('right_arm_action', [])
+                    )
                     raw_writer.append_event('control', {
                         'sequence': int(getattr(tele_data, 'controller_pose_sequence', 0)),
                         'control_start_wall_ns': int(control_cycle_timestamp_ns),
@@ -1469,6 +1505,16 @@ if __name__ == '__main__':
                         'pico_receive_wall_ns': int(
                             getattr(tele_data, 'controller_pose_wall_ns', 0) or 0
                         ),
+                        'state_receive_monotonic_ns': int(
+                            robot.last_step_alignment_ns.get(
+                                'state_receive_monotonic', 0
+                            ) or 0
+                        ),
+                        'measured_q_rad': list(measured_q),
+                        'command_q_rad': list(command_q),
+                        'teleop_mode': TELEOP_MODE,
+                        'controller_mapping': args.controller_mapping,
+                        'orientation_control': args.orientation_control,
                         'timing_ms': dict(robot.last_step_timing_ms),
                         'dual_object': robot.get_dual_object_status(),
                     })
@@ -1553,7 +1599,11 @@ if __name__ == '__main__':
                         )
 
                 # ── 录制（机器人无关）──
-                if args.record and RECORD_RUNNING:
+                if (
+                    args.record
+                    and RECORD_RUNNING
+                    and episode_writer is not None
+                ):
                     try:
                         colors = {}
                         depths = {}
@@ -1780,19 +1830,15 @@ if __name__ == '__main__':
             except Exception:
                 pass
 
-        # 自动停止可能仍在进行的 ServoJ 录制
+        # Save a raw episode if teleoperation exits while recording.
         if args.record:
             try:
-                if RECORD_RUNNING and 'episode_writer' in locals():
-                    if raw_writer is not None:
-                        raw_writer.stop_episode()
-                    episode_writer.save_episode()
-                    logger_mp.info("Active dataset episode queued for saving.")
-                if getattr(recorder_manager.recorder, '_servo_recording', False):
-                    recorder_manager.stop_servo_recording()
-                    logger_mp.info("ServoJ recording stopped automatically (teleop exited).")
+                if RECORD_RUNNING:
+                    RECORD_TOGGLE = True
+                    _process_record_requests()
+                    logger_mp.info("Active raw episode saved on teleop exit.")
             except Exception:
-                logger_mp.exception("Failed to auto-stop ServoJ recording")
+                logger_mp.exception("Failed to auto-save raw recording")
             RECORD_RUNNING = False
             if args.sim:
                 pass  # sim reset TODO
@@ -1825,7 +1871,11 @@ if __name__ == '__main__':
 
         # auto-save any active recording
         try:
-            if args.record and 'recorder_manager' in locals():
+            if (
+                args.record
+                and 'recorder_manager' in locals()
+                and recorder_manager is not None
+            ):
                 if getattr(recorder_manager.recorder, '_servo_recording', False):
                     recorder_manager.stop_servo_recording()
                 if getattr(recorder_manager.recorder, '_program_active', False):

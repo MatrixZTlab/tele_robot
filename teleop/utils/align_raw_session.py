@@ -165,6 +165,97 @@ def nearest_event(events: list[dict[str, Any]], times: list[int], target_ns: int
     return events[index], times[index] - target_ns
 
 
+def fixed_grid_matches(
+    events: list[dict[str, Any]], times: list[int], fps: float
+) -> list[dict[str, Any]]:
+    """Match a true fixed-rate grid to a reference stream without changing grid time.
+
+    The previous implementation used the matched camera timestamp as the target
+    timestamp.  That inherited camera jitter and silently shortened the episode
+    whenever an invalid frame was skipped.  Grid timestamps are now authoritative;
+    the camera timestamp is only a matched observation with a measured error.
+    """
+    if not times:
+        return []
+    period_ns = int(round(1e9 / fps))
+    targets = range(int(times[0]), int(times[-1]) + 1, period_ns)
+    matches = []
+    previous_identity = None
+    reuse_run_length = 0
+    for grid_index, target_ns in enumerate(targets):
+        event, delta_ns = nearest_event(events, times, target_ns)
+        identity = None
+        if event is not None:
+            candidate_identity = (
+                event.get("stream_session_id"),
+                event.get("sequence"),
+                event.get("device_timestamp_raw"),
+            )
+            if any(value is not None for value in candidate_identity):
+                identity = candidate_identity
+        reused = identity is not None and identity == previous_identity
+        reuse_run_length = reuse_run_length + 1 if reused else 0
+        matches.append(
+            {
+                "grid_index": grid_index,
+                "target_ns": int(target_ns),
+                "event": event,
+                "delta_ns": delta_ns,
+                "reference_reused": reused,
+                "reference_reuse_run_length": reuse_run_length,
+            }
+        )
+        previous_identity = identity
+    return matches
+
+
+def select_action_event(
+    events: list[dict[str, Any]],
+    times: list[int],
+    target_ns: int,
+    mode: str,
+):
+    """Select the command associated with an observation target timestamp."""
+    if not events:
+        return None, None
+    if mode == "nearest":
+        return nearest_event(events, times, target_ns)
+    if mode == "first-after":
+        pos = bisect.bisect_left(times, target_ns)
+        if pos >= len(events):
+            return None, None
+        return events[pos], times[pos] - target_ns
+    if mode == "latest-before":
+        pos = bisect.bisect_right(times, target_ns) - 1
+        if pos < 0:
+            return None, None
+        return events[pos], times[pos] - target_ns
+    raise ValueError(f"Unsupported action match mode: {mode}")
+
+
+def invalid_runs(valid_grid_indices: list[int], candidate_count: int) -> list[dict[str, int | bool]]:
+    """Return contiguous invalid-grid runs and whether each touches an edge."""
+    valid = set(valid_grid_indices)
+    runs = []
+    start = None
+    for index in range(candidate_count + 1):
+        is_invalid = index < candidate_count and index not in valid
+        if is_invalid and start is None:
+            start = index
+        elif not is_invalid and start is not None:
+            end = index - 1
+            runs.append(
+                {
+                    "start_grid_index": start,
+                    "end_grid_index": end,
+                    "length": end - start + 1,
+                    "touches_edge": start == 0 or end == candidate_count - 1,
+                }
+            )
+            start = None
+    return runs
+
+
 def bracket_events(events: list[dict[str, Any]], times: list[int], target_ns: int):
     pos = bisect.bisect_left(times, target_ns)
     if pos < len(events) and times[pos] == target_ns:
@@ -276,7 +367,7 @@ def remove_unreferenced_files(directory: Path, referenced: set[str]) -> None:
             path.unlink()
 
 
-def sequence_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
+def sequence_summary(events: list[dict[str, Any]]) -> dict[str, int | float | None]:
     sequences = [int(event["sequence"]) for event in events if event.get("sequence") is not None]
     missing = 0
     duplicates = 0
@@ -288,6 +379,7 @@ def sequence_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
             duplicates += 1
         else:
             backwards += 1
+    denominator = len(sequences) + missing
     return {
         "events": len(events),
         "with_sequence": len(sequences),
@@ -296,6 +388,7 @@ def sequence_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
         "missing": missing,
         "duplicates": duplicates,
         "backwards": backwards,
+        "missing_ratio": (missing / denominator) if denominator else 0.0,
     }
 
 
@@ -310,6 +403,21 @@ def rgbd_delta_ms(event: dict[str, Any], clock_model: dict[str, Any]) -> float |
 
 def align_episode(args: argparse.Namespace) -> Path:
     raw_dir = args.input_episode.expanduser().resolve()
+    no_depth = bool(getattr(args, "no_depth", False))
+    require_pico = bool(getattr(args, "require_pico", False))
+    action_offset_ms = float(getattr(args, "action_offset_ms", 0.0))
+    action_match = str(getattr(args, "action_match", "latest-before"))
+    gap_policy = str(getattr(args, "gap_policy", "trim-edges"))
+    max_camera_hold_ms = float(getattr(args, "max_camera_hold_ms", 75.0))
+    max_camera_hold_frames = int(getattr(args, "max_camera_hold_frames", 2))
+    max_state_interpolation_gap_ms = float(
+        getattr(args, "max_state_interpolation_gap_ms", 150.0)
+    )
+    max_action_hold_ms = float(getattr(args, "max_action_hold_ms", 150.0))
+    max_imputed_ratio = float(getattr(args, "max_imputed_ratio", 0.10))
+    max_sequence_missing_ratio = float(
+        getattr(args, "max_sequence_missing_ratio", 0.05)
+    )
     manifest_path = raw_dir / "manifest.json"
     with manifest_path.open("r", encoding="utf-8") as handle:
         raw_manifest = json.load(handle)
@@ -345,16 +453,17 @@ def align_episode(args: argparse.Namespace) -> Path:
             clock_issues.append(f"camera:{name}:device_clock_unavailable")
         elif model.get("residual_p95_ms", float("inf")) > args.max_clock_fit_residual_ms:
             clock_issues.append(f"camera:{name}:clock_fit_residual")
-        if any(event.get("depth_path") for event in cameras[name]) and not any(
+        if not no_depth and any(event.get("depth_path") for event in cameras[name]) and not any(
             event.get("device_timestamp_raw") is not None
             and event.get("depth_device_timestamp_raw") is not None
             for event in cameras[name]
         ):
             clock_issues.append(f"camera:{name}:depth_clock_unavailable")
-    if pico_model.get("kind") != "affine_pico_to_control_host":
-        clock_issues.append("pico:source_clock_unavailable")
-    elif pico_model.get("residual_p95_ms", float("inf")) > args.max_clock_fit_residual_ms:
-        clock_issues.append("pico:clock_fit_residual")
+    if require_pico:
+        if pico_model.get("kind") != "affine_pico_to_control_host":
+            clock_issues.append("pico:source_clock_unavailable")
+        elif pico_model.get("residual_p95_ms", float("inf")) > args.max_clock_fit_residual_ms:
+            clock_issues.append("pico:clock_fit_residual")
     control_clock = raw_manifest.get("control_host_clock_sync")
     if control_clock is not None and not control_clock.get("valid", False):
         clock_issues.append("control_host:chrony_invalid")
@@ -388,15 +497,7 @@ def align_episode(args: argparse.Namespace) -> Path:
     if not reference_times or not lowstate or not lowcmd:
         raise ValueError("Alignment requires reference camera, LowState, and LowCmd streams")
 
-    period_ns = int(round(1e9 / args.fps))
-    targets = range(reference_times[0], reference_times[-1] + 1, period_ns)
-    selected_reference = []
-    last_sequence = None
-    for target in targets:
-        event, _ = nearest_event(cameras[reference], reference_times, target)
-        if event is not None and event.get("sequence") != last_sequence:
-            selected_reference.append(event)
-            last_sequence = event.get("sequence")
+    grid_matches = fixed_grid_matches(cameras[reference], reference_times, args.fps)
 
     output_dir = args.output_dir.expanduser().resolve() if args.output_dir else raw_dir.parent.parent / "aligned" / raw_dir.name
     if output_dir.exists():
@@ -415,14 +516,24 @@ def align_episode(args: argparse.Namespace) -> Path:
     state_gaps_ms = []
     pico_gaps_ms = []
     command_ages_ms = []
+    imputation_counts: dict[str, int] = {}
+    camera_previous_identity = {name: None for name in cameras}
+    camera_reuse_run_length = {name: 0 for name in cameras}
 
     def invalidate(reasons, reason):
         reasons.append(reason)
         invalid_counts[reason] = invalid_counts.get(reason, 0) + 1
 
-    for reference_event in selected_reference:
-        target_ns = int(reference_event["aligned_wall_ns"])
+    def impute(reasons, reason):
+        reasons.append(reason)
+        imputation_counts[reason] = imputation_counts.get(reason, 0) + 1
+
+    valid_grid_indices = []
+    for grid_match in grid_matches:
+        grid_index = int(grid_match["grid_index"])
+        target_ns = int(grid_match["target_ns"])
         reasons = []
+        imputation_reasons = []
         colors = {}
         depths = {}
         camera_alignment = {}
@@ -430,27 +541,49 @@ def align_episode(args: argparse.Namespace) -> Path:
             event, delta_ns = nearest_event(events, camera_times[name], target_ns)
             delta_ms = delta_ns / 1e6 if delta_ns is not None else None
             camera_alignment[name] = delta_ms
-            if delta_ms is None or abs(delta_ms) > args.max_camera_error_ms:
+            identity = None
+            if event is not None:
+                identity = (
+                    event.get("stream_session_id"),
+                    event.get("sequence"),
+                    event.get("device_timestamp_raw"),
+                )
+                if not any(value is not None for value in identity):
+                    identity = None
+            reused = identity is not None and identity == camera_previous_identity[name]
+            camera_reuse_run_length[name] = (
+                camera_reuse_run_length[name] + 1 if reused else 0
+            )
+            camera_previous_identity[name] = identity
+            if delta_ms is None or abs(delta_ms) > max_camera_hold_ms:
                 invalidate(reasons, f"camera:{name}:unmatched")
                 continue
+            if camera_reuse_run_length[name] > max_camera_hold_frames:
+                invalidate(reasons, f"camera:{name}:hold_too_long")
+                continue
+            if abs(delta_ms) > args.max_camera_error_ms:
+                impute(imputation_reasons, f"camera:{name}:nearest_hold")
+            if reused:
+                impute(imputation_reasons, f"camera:{name}:reused_for_grid")
             camera_errors_ms[name].append(delta_ms)
-            depth_delta_ms = rgbd_delta_ms(event, camera_models[name])
-            if depth_delta_ms is not None:
-                rgbd_errors_ms[name].append(depth_delta_ms)
-                if abs(depth_delta_ms) > args.max_rgbd_error_ms:
-                    invalidate(reasons, f"camera:{name}:rgbd_skew")
+            if not no_depth:
+                depth_delta_ms = rgbd_delta_ms(event, camera_models[name])
+                if depth_delta_ms is not None:
+                    rgbd_errors_ms[name].append(depth_delta_ms)
+                    if abs(depth_delta_ms) > args.max_rgbd_error_ms:
+                        invalidate(reasons, f"camera:{name}:rgbd_skew")
             try:
                 source_image = raw_dir / event["image_path"]
-                color_name = f"{len(frames):06d}_color_{camera_index}.jpg"
+                color_name = f"{grid_index:06d}_color_{camera_index}.jpg"
                 shutil.copy2(source_image, colors_dir / color_name)
                 colors[f"color_{camera_index}"] = str(Path("colors") / color_name)
             except (KeyError, OSError):
                 invalidate(reasons, f"camera:{name}:image_missing")
-            if event.get("depth_path") and event.get("depth_shape"):
+            if not no_depth and event.get("depth_path") and event.get("depth_shape"):
                 try:
                     dtype = np.dtype(event.get("depth_dtype", "uint16"))
                     depth = np.fromfile(raw_dir / event["depth_path"], dtype=dtype).reshape(event["depth_shape"])
-                    depth_name = f"{len(frames):06d}_depth_{camera_index}.png"
+                    depth_name = f"{grid_index:06d}_depth_{camera_index}.png"
                     if not cv2.imwrite(str(depths_dir / depth_name), depth):
                         raise OSError("cv2.imwrite returned false")
                     depths[f"depth_{camera_index}"] = str(Path("depths") / depth_name)
@@ -464,8 +597,10 @@ def align_episode(args: argparse.Namespace) -> Path:
         state_left, state_right, state_alpha, state_gap_ns = state_bracket
         state_gap_ms = state_gap_ns / 1e6
         state_gaps_ms.append(state_gap_ms)
-        if state_gap_ms > args.max_state_gap_ms:
+        if state_gap_ms > max_state_interpolation_gap_ms:
             invalidate(reasons, "lowstate:gap")
+        elif state_gap_ms > args.max_state_gap_ms:
+            impute(imputation_reasons, "lowstate:short_interpolation")
         try:
             q = lerp_vector(state_left["q"], state_right["q"], state_alpha)
             dq = lerp_vector(state_left["dq"], state_right["dq"], state_alpha)
@@ -475,15 +610,19 @@ def align_episode(args: argparse.Namespace) -> Path:
             invalidate(reasons, "lowstate:invalid")
             continue
 
-        command_pos = bisect.bisect_right(command_times, target_ns) - 1
-        command = lowcmd[command_pos] if command_pos >= 0 else None
+        action_target_ns = target_ns + int(round(action_offset_ms * 1e6))
+        command, command_delta_ns = select_action_event(
+            lowcmd, command_times, action_target_ns, action_match
+        )
         if command is None:
             invalidate(reasons, "lowcmd:missing")
             continue
-        command_age_ms = (target_ns - command["aligned_wall_ns"]) / 1e6
+        command_age_ms = abs(float(command_delta_ns)) / 1e6
         command_ages_ms.append(command_age_ms)
-        if command_age_ms > args.max_action_age_ms:
+        if command_age_ms > max_action_hold_ms:
             invalidate(reasons, "lowcmd:stale")
+        elif command_age_ms > args.max_action_age_ms:
+            impute(imputation_reasons, "lowcmd:short_hold")
         action = command.get("q_commanded", command.get("q_ik_target"))
         if action is None or len(action) < 14:
             invalidate(reasons, "lowcmd:invalid")
@@ -495,12 +634,13 @@ def align_episode(args: argparse.Namespace) -> Path:
         pico_data = None
         pico_bracket = bracket_events(pico, pico_times, target_ns)
         if pico_bracket is None:
-            invalidate(reasons, "pico:no_bracket")
+            if require_pico:
+                invalidate(reasons, "pico:no_bracket")
         else:
             pico_left, pico_right, pico_alpha, pico_gap_ns = pico_bracket
             pico_gap_ms = pico_gap_ns / 1e6
             pico_gaps_ms.append(pico_gap_ms)
-            if pico_gap_ms > args.max_pico_gap_ms:
+            if require_pico and pico_gap_ms > args.max_pico_gap_ms:
                 invalidate(reasons, "pico:gap")
             try:
                 pico_data = {
@@ -510,16 +650,19 @@ def align_episode(args: argparse.Namespace) -> Path:
                     "right_state": pico_left.get("right_state"),
                 }
             except (KeyError, TypeError, ValueError, np.linalg.LinAlgError):
-                invalidate(reasons, "pico:invalid_pose")
+                if require_pico:
+                    invalidate(reasons, "pico:invalid_pose")
                 pico_data = None
 
         if reasons and not args.keep_invalid:
             continue
         frame_index = len(frames)
+        if not reasons:
+            valid_grid_indices.append(grid_index)
         frames.append({
             "idx": frame_index,
             "frame_index": frame_index,
-            "timestamp": frame_index / args.fps,
+            "timestamp": 0.0,
             "episode_index": int(raw_dir.name.split("_")[-1]),
             "colors": colors,
             "depths": depths,
@@ -539,20 +682,39 @@ def align_episode(args: argparse.Namespace) -> Path:
             },
             "pico": pico_data,
             "alignment": {
-                "scheme": "camera_reference_interpolation_v1",
+                "scheme": "fixed_grid_interpolation_v2",
                 "valid": not reasons,
                 "invalid_reasons": reasons,
-                "reference_wall_ns": target_ns,
+                "imputed": bool(imputation_reasons),
+                "imputation_reasons": imputation_reasons,
+                "grid_index": grid_index,
+                "grid_target_wall_ns": target_ns,
+                "reference_wall_ns": int(grid_match["event"]["aligned_wall_ns"]),
                 "camera_delta_ms": camera_alignment,
                 "lowstate_gap_ms": state_gap_ms,
                 "pico_gap_ms": pico_gaps_ms[-1] if pico_data is not None else None,
                 "lowcmd_age_ms": command_age_ms,
+                "action_target_wall_ns": action_target_ns,
+                "action_time_error_ms": float(command_delta_ns) / 1e6,
+                "action_match": action_match,
+                "action_offset_ms": action_offset_ms,
                 "lowcmd_sequence": command.get("sequence"),
             },
         })
 
     if not frames:
         raise RuntimeError("No valid aligned frames were produced; inspect thresholds and raw streams")
+
+    # Rebase to episode time while retaining the true fixed-grid spacing.  With
+    # trim-edges this remains exactly 1/fps; with explicit legacy compression it
+    # exposes any interior hole instead of disguising it as contiguous data.
+    first_grid_target_ns = int(frames[0]["alignment"]["grid_target_wall_ns"])
+    for frame_index, frame in enumerate(frames):
+        frame["idx"] = frame_index
+        frame["frame_index"] = frame_index
+        frame["timestamp"] = (
+            int(frame["alignment"]["grid_target_wall_ns"]) - first_grid_target_ns
+        ) / 1e9
 
     remove_unreferenced_files(
         colors_dir,
@@ -577,8 +739,12 @@ def align_episode(args: argparse.Namespace) -> Path:
             "fps": args.fps,
             "tolerance_s": 1e-4,
             "alignment": {
-                "scheme": "camera_reference_interpolation_v1",
+                "scheme": "fixed_grid_interpolation_v2",
                 "reference_camera": reference,
+                "gap_policy": gap_policy,
+                "pico_required": require_pico,
+                "action_match": action_match,
+                "action_offset_ms": action_offset_ms,
             },
         },
         "text": {
@@ -591,8 +757,14 @@ def align_episode(args: argparse.Namespace) -> Path:
     with (output_dir / "data.json").open("w", encoding="utf-8") as handle:
         json.dump(episode, handle, ensure_ascii=False, indent=2)
 
-    valid_frame_count = sum(frame["alignment"]["valid"] for frame in frames)
-    valid_ratio = valid_frame_count / len(selected_reference) if selected_reference else 0.0
+    valid_frame_count = len(valid_grid_indices)
+    valid_ratio = valid_frame_count / len(grid_matches) if grid_matches else 0.0
+    imputed_frame_count = sum(
+        bool(frame.get("alignment", {}).get("imputed")) for frame in frames
+    )
+    imputed_ratio = imputed_frame_count / len(frames) if frames else 0.0
+    timeline_invalid_runs = invalid_runs(valid_grid_indices, len(grid_matches))
+    internal_invalid_runs = [run for run in timeline_invalid_runs if not run["touches_edge"]]
     sequence_quality = {
         **{
             f"camera.{name}": camera_sequence_quality[name]
@@ -603,6 +775,7 @@ def align_episode(args: argparse.Namespace) -> Path:
         "lowcmd": sequence_summary(lowcmd),
     }
     quality_issues = []
+    quality_warnings = []
     if raw_manifest.get("complete") is False:
         quality_issues.append("raw_manifest_incomplete")
     if any(int(value) > 0 for value in raw_manifest.get("dropped", {}).values()):
@@ -610,27 +783,45 @@ def align_episode(args: argparse.Namespace) -> Path:
     if any(int(value) > 0 for value in raw_manifest.get("failed", {}).values()):
         quality_issues.append("raw_writer_failures")
     for stream, summary in sequence_quality.items():
-        if stream.startswith("camera.") or stream in ("pico", "lowstate"):
-            if summary["missing"] or summary["backwards"]:
+        if stream.startswith("camera.") or stream == "lowstate" or (
+            require_pico and stream == "pico"
+        ):
+            if summary["backwards"]:
                 quality_issues.append(f"{stream}:sequence_discontinuity")
+            elif float(summary.get("missing_ratio", 0.0)) > max_sequence_missing_ratio:
+                quality_issues.append(f"{stream}:excessive_sequence_loss")
+            elif summary["missing"]:
+                quality_warnings.append(f"{stream}:minor_sequence_loss")
     pico_producer_drops = max(
         (int(event.get("producer_drop_count", 0)) for event in pico),
         default=0,
     )
-    if pico_producer_drops:
+    if require_pico and pico_producer_drops:
         quality_issues.append("pico:producer_queue_drops")
     if 1.0 - valid_ratio > args.max_invalid_ratio:
         quality_issues.append("aligned_invalid_ratio")
+    if imputed_ratio > max_imputed_ratio:
+        quality_issues.append("aligned_imputed_ratio")
+    timeline_rejected = False
+    if gap_policy == "reject" and timeline_invalid_runs:
+        quality_issues.append("timeline:invalid_grid_targets")
+        timeline_rejected = True
+    elif gap_policy == "trim-edges" and internal_invalid_runs:
+        quality_issues.append("timeline:internal_gap")
+        timeline_rejected = True
 
     report = {
         "input": str(raw_dir),
         "output": str(output_dir),
         "reference_camera": reference,
-        "candidate_frames": len(selected_reference),
+        "candidate_frames": len(grid_matches),
         "written_frames": len(frames),
         "valid_frames": valid_frame_count,
         "valid_ratio": valid_ratio,
         "invalid_counts": invalid_counts,
+        "imputed_frames": imputed_frame_count,
+        "imputed_ratio": imputed_ratio,
+        "imputation_counts": imputation_counts,
         "raw_manifest_complete": raw_manifest.get("complete"),
         "raw_queue_dropped": raw_manifest.get("dropped", {}),
         "raw_write_failed": raw_manifest.get("failed", {}),
@@ -639,6 +830,21 @@ def align_episode(args: argparse.Namespace) -> Path:
         "pico_producer_queue_drops": pico_producer_drops,
         "quality_valid": not quality_issues,
         "quality_issues": quality_issues,
+        "quality_warnings": quality_warnings,
+        "timeline": {
+            "scheme": "fixed_grid_interpolation_v2",
+            "fps": args.fps,
+            "period_ns": int(round(1e9 / args.fps)),
+            "gap_policy": gap_policy,
+            "invalid_runs": timeline_invalid_runs,
+            "internal_invalid_runs": internal_invalid_runs,
+            "rejected": timeline_rejected,
+        },
+        "pico_required": require_pico,
+        "action_alignment": {
+            "match": action_match,
+            "offset_ms": action_offset_ms,
+        },
         "camera_clock_models": camera_models,
         "pico_clock_model": pico_model,
         "source_clock_valid": not clock_issues,
@@ -658,13 +864,24 @@ def align_episode(args: argparse.Namespace) -> Path:
             "lowstate_gap": args.max_state_gap_ms,
             "pico_gap": args.max_pico_gap_ms,
             "action_age": args.max_action_age_ms,
+            "camera_hold": max_camera_hold_ms,
+            "camera_hold_frames": max_camera_hold_frames,
+            "state_interpolation_gap": max_state_interpolation_gap_ms,
+            "action_hold": max_action_hold_ms,
             "clock_fit_residual": args.max_clock_fit_residual_ms,
             "invalid_ratio": args.max_invalid_ratio,
+            "imputed_ratio": max_imputed_ratio,
+            "sequence_missing_ratio": max_sequence_missing_ratio,
         },
     }
     report_path = output_dir / "alignment_report.json"
     with report_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
+    if timeline_rejected:
+        raise RuntimeError(
+            f"Timeline policy {gap_policy!r} rejected the episode because invalid "
+            f"fixed-grid targets would create an internal discontinuity. Inspect {report_path}"
+        )
     if args.require_quality and quality_issues:
         raise RuntimeError(
             "Strict alignment quality check failed: "
@@ -682,17 +899,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-camera", default="head_camera")
     parser.add_argument("--camera-latency-ms", action="append", default=[], metavar="NAME=MS")
     parser.add_argument("--max-camera-error-ms", type=float, default=20.0)
+    parser.add_argument(
+        "--max-camera-hold-ms", type=float, default=75.0,
+        help="Permit a nearest cached frame only within this hard age bound",
+    )
+    parser.add_argument(
+        "--max-camera-hold-frames", type=int, default=2,
+        help="Maximum consecutive fixed-grid targets allowed to reuse one camera frame",
+    )
     parser.add_argument("--max-rgbd-error-ms", type=float, default=10.0)
+    parser.add_argument("--no-depth", action="store_true",
+                        help="Ignore raw depth streams and do not write aligned depth PNGs")
     parser.add_argument("--max-state-gap-ms", type=float, default=30.0)
+    parser.add_argument(
+        "--max-state-interpolation-gap-ms", type=float, default=150.0,
+        help="Hard bound for interpolating a short LowState gap",
+    )
     parser.add_argument("--max-pico-gap-ms", type=float, default=35.0)
     parser.add_argument("--max-action-age-ms", type=float, default=100.0)
+    parser.add_argument(
+        "--max-action-hold-ms", type=float, default=150.0,
+        help="Hard bound for holding the most recent command",
+    )
+    parser.add_argument(
+        "--action-offset-ms",
+        type=float,
+        default=0.0,
+        help="Pair each observation at t with a command near t + offset (ms)",
+    )
+    parser.add_argument(
+        "--action-match",
+        choices=("latest-before", "nearest", "first-after"),
+        default="latest-before",
+        help="Temporal rule used to pair LowCmd with each observation",
+    )
     parser.add_argument("--max-clock-fit-residual-ms", type=float, default=2.0)
     parser.add_argument("--max-invalid-ratio", type=float, default=0.05)
+    parser.add_argument(
+        "--max-imputed-ratio", type=float, default=0.10,
+        help="Quality-report limit for frames using bounded hold/interpolation",
+    )
+    parser.add_argument(
+        "--max-sequence-missing-ratio", type=float, default=0.05,
+        help="Quality failure threshold for missing source sequence numbers",
+    )
+    parser.add_argument(
+        "--require-pico",
+        action="store_true",
+        help="Require a valid Pico pose at every training frame (off by default)",
+    )
     parser.add_argument("--require-source-clocks", action="store_true",
-                        help="Fail unless Pico and every camera expose a stable source clock")
+                        help="Fail unless every required source exposes a stable source clock")
     parser.add_argument("--require-quality", action="store_true",
                         help="Fail on raw drops, sequence gaps, or excessive invalid frames")
     parser.add_argument("--keep-invalid", action="store_true")
+    parser.add_argument(
+        "--gap-policy",
+        choices=("reject", "trim-edges", "compress"),
+        default="trim-edges",
+        help="Never compress internal gaps unless legacy 'compress' is explicitly selected",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 

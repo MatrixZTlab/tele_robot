@@ -1,5 +1,6 @@
 import unittest
 import threading
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -89,6 +90,12 @@ class LiveHelpersTest(unittest.TestCase):
         args = _build_parser().parse_args([])
         self.assertFalse(args.live)
         self.assertFalse(args.allow_hard_limit_start)
+        self.assertFalse(args.disable_tracking_error_check)
+        self.assertFalse(args.disable_ik_safety_checks)
+        self.assertFalse(args.legacy_stale_state_behavior)
+        self.assertEqual(args.legacy_stale_state_hard_timeout, 2.0)
+        self.assertIsNone(args.record_cameras)
+        self.assertEqual(args.orientation_control, "vr")
         self.assertIsNone(args.controller_mapping)
         self.assertEqual(args.arm_scale, 0.7)
         self.assertEqual(args.state_timeout, 0.25)
@@ -116,6 +123,36 @@ class LiveHelpersTest(unittest.TestCase):
         _validate_args(
             parser.parse_args(
                 ["--live", "--controller-mapping", "mirrored"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "hard-timeout"):
+            _validate_args(
+                parser.parse_args(
+                    [
+                        "--legacy-stale-state-behavior",
+                        "--state-timeout",
+                        "0.5",
+                        "--legacy-stale-state-hard-timeout",
+                        "0.5",
+                    ]
+                )
+            )
+        args = parser.parse_args(["--record-cameras", "head"])
+        self.assertEqual(args.record_cameras, ["head"])
+        with self.assertRaisesRegex(ValueError, "raw-only"):
+            _validate_args(
+                parser.parse_args(["--record", "--no-raw-record"])
+            )
+        args = parser.parse_args(["--orientation-control", "locked"])
+        self.assertEqual(args.orientation_control, "locked")
+        _validate_args(
+            parser.parse_args(
+                [
+                    "--live",
+                    "--controller-mapping",
+                    "mirrored",
+                    "--disable-tracking-error-check",
+                ]
             )
         )
 
@@ -373,6 +410,56 @@ class LiveCoreTest(unittest.TestCase):
             np.array([0.4, -0.2, 0.8]) + expected_delta,
         )
 
+    def test_locked_orientation_ignores_both_wrist_rotations(self):
+        solver = FakeSolver()
+        core = H1MuJoCoLiveCore(
+            solver,
+            orientation_control="locked",
+            max_solver_jump_rad=0.2,
+        )
+        core.arm(np.zeros(14), self.pose, self.pose)
+        moved = np.eye(4)
+        moved[:3, :3] = np.array(
+            [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        moved[0, 3] = 0.1
+
+        core.step(np.zeros(14), moved, moved, 0.05)
+
+        np.testing.assert_allclose(solver.last_left_target[:3, :3], np.eye(3))
+        np.testing.assert_allclose(solver.last_right_target[:3, :3], np.eye(3))
+        self.assertFalse(np.allclose(solver.last_left_target[:3, 3], [0.4, 0.2, 0.8]))
+
+    def test_right_a_style_box_lock_rejects_differential_hand_motion(self):
+        locked, width = self.core.toggle_dual_object_lock(
+            np.zeros(14), self.pose, self.pose, now_s=1.0
+        )
+        self.assertTrue(locked)
+        self.assertTrue(self.core.dual_object_locked)
+        self.assertAlmostEqual(width, 0.4)
+
+        left_moved = np.eye(4)
+        right_moved = np.eye(4)
+        left_moved[0, 3] = 0.10
+        right_moved[0, 3] = -0.10
+        self.core.step(np.zeros(14), left_moved, right_moved, 0.05)
+
+        # Opposite controller motion is rejected while locked: the measured
+        # grasp width and both robot-side endpoints remain fixed.
+        np.testing.assert_allclose(
+            self.solver.last_left_target[:3, 3], [0.4, 0.2, 0.8]
+        )
+        np.testing.assert_allclose(
+            self.solver.last_right_target[:3, 3], [0.4, -0.2, 0.8]
+        )
+
+        locked, width = self.core.toggle_dual_object_lock(
+            np.zeros(14), left_moved, right_moved, now_s=1.1
+        )
+        self.assertFalse(locked)
+        self.assertIsNone(width)
+        self.assertFalse(self.core.dual_object_locked)
+
     def test_hard_limit_start_holds_exact_measured_pose(self):
         solver = FakeSolver()
         solver.lower = H1_HARD_ARM_LOWER.copy()
@@ -438,6 +525,25 @@ class LiveCoreTest(unittest.TestCase):
         self.assertTrue(result.held_for_ik_safety)
         np.testing.assert_allclose(result.command_q, np.zeros(14))
 
+    def test_dry_run_can_explicitly_accept_nonconverged_ik(self):
+        core = H1MuJoCoLiveCore(
+            self.solver,
+            max_joint_speed_rad_s=30.0,
+            max_solver_jump_rad=0.01,
+            ik_safety_checks_enabled=False,
+        )
+        core.arm(np.zeros(14), self.pose, self.pose)
+        self.solver.converged = False
+        self.solver.position_error = 0.5
+        self.solver.rotation_error = 0.5
+        self.solver.result_q[:] = 0.5
+
+        result = core.step(np.zeros(14), self.pose, self.pose, 0.05)
+
+        self.assertFalse(result.held_for_ik_safety)
+        self.assertTrue(result.accepted_approximately)
+        np.testing.assert_allclose(result.command_q, np.full(14, 0.5))
+
     def test_speed_lag_is_not_mistaken_for_an_ik_branch_jump(self):
         self.solver.result_q[:] = 0.15
         first = self.core.step(np.zeros(14), self.pose, self.pose, 0.05)
@@ -454,6 +560,22 @@ class LiveCoreTest(unittest.TestCase):
         measured[4] = 0.36
         with self.assertRaisesRegex(LiveSafetyError, "tracking error"):
             self.core.step(measured, self.pose, self.pose, 0.05)
+
+    def test_tracking_error_check_can_be_explicitly_disabled(self):
+        core = H1MuJoCoLiveCore(
+            self.solver,
+            max_joint_speed_rad_s=0.5,
+            max_solver_jump_rad=0.2,
+            tracking_error_check_enabled=False,
+        )
+        core.arm(np.zeros(14), self.pose, self.pose)
+        measured = np.zeros(14)
+        measured[4] = 0.36
+
+        result = core.step(measured, self.pose, self.pose, 0.05)
+
+        self.assertEqual(result.command_q.shape, (14,))
+        self.assertTrue(np.all(np.isfinite(result.command_q)))
 
     def test_disarmed_core_rejects_step(self):
         self.core.disarm()
@@ -537,38 +659,28 @@ class FakeEpisodeWriter:
         self.closed = True
 
 
-class FakeRecorder:
-    instances = []
+class FakeRawWriter:
+    def __init__(self):
+        self.started = []
+        self.events = []
+        self.stopped = 0
+        self.closed = False
 
-    def __init__(self, buffer_size):
-        self.buffer_size = buffer_size
-        self.points = []
-        self._servo_recording = False
-        self.finished = False
-        self.start_args = None
-        self.start_kwargs = None
-        FakeRecorder.instances.append(self)
+    def start_episode(self, episode_index, metadata=None):
+        self.started.append((episode_index, metadata))
 
-    def start_program(self, *args, **kwargs):
-        self.start_args = args
-        self.start_kwargs = kwargs
+    def append_event(self, stream, event):
+        self.events.append((stream, event))
 
-    def start_servo_recording(self):
-        self._servo_recording = True
+    def stop_episode(self):
+        self.stopped += 1
 
-    def add_ServoJ(self, joint_pose, **kwargs):
-        self.points.append((joint_pose, kwargs))
-
-    def stop_servo_recording(self, smooth_window_size):
-        self._servo_recording = False
-
-    def finish(self):
-        self.finished = True
+    def close(self):
+        self.closed = True
 
 
 class FormalRecordingSessionTest(unittest.TestCase):
     def setUp(self):
-        FakeRecorder.instances = []
         self.image = SimpleNamespace(
             bgr=np.zeros((2, 2, 3), dtype=np.uint8),
             depth=None,
@@ -580,12 +692,21 @@ class FormalRecordingSessionTest(unittest.TestCase):
             get_right_wrist_frame=lambda: self.image,
         )
         self.writer = FakeEpisodeWriter()
+        self.camera_config = {
+            "head_camera": {"enable_zmq": True},
+            "left_wrist_camera": {"enable_zmq": True},
+            "right_wrist_camera": {"enable_zmq": True},
+        }
+        self.camera_key_plan = [
+            {"source": "head"},
+            {"source": "left_wrist"},
+            {"source": "right_wrist"},
+        ]
         self.session = FormalRecordingSession(
             image_client=self.client,
-            camera_config={},
-            camera_key_plan=[],
-            episode_writer=self.writer,
-            recorder_cls=FakeRecorder,
+            camera_config=self.camera_config,
+            camera_key_plan=self.camera_key_plan,
+            legacy_episode_writer=self.writer,
             output_root=SimpleNamespace(__str__=lambda _self: "/tmp/fake"),
             task_name="test",
             task_description="test",
@@ -600,17 +721,34 @@ class FormalRecordingSessionTest(unittest.TestCase):
             self.session.start()
         self.assertFalse(self.session.active)
 
-    def test_frame_writes_lerobot_and_legacy_action(self):
+    def test_head_only_session_does_not_read_disabled_wrist_cameras(self):
+        self.client.get_left_wrist_frame = mock.Mock(
+            side_effect=AssertionError("left wrist must not be read")
+        )
+        self.client.get_right_wrist_frame = mock.Mock(
+            side_effect=AssertionError("right wrist must not be read")
+        )
+        session = FormalRecordingSession(
+            image_client=self.client,
+            camera_config={"head_camera": {"enable_zmq": True}},
+            camera_key_plan=[{"source": "head"}],
+            legacy_episode_writer=self.writer,
+            output_root=SimpleNamespace(__str__=lambda _self: "/tmp/fake"),
+            task_name="head_only",
+            task_description="head only",
+            frequency=20,
+            sync_tolerance_s=1e-4,
+            camera_sync_tolerance_s=0.02,
+        )
+
+        session.start()
+
+        self.assertTrue(session.active)
+        self.client.get_left_wrist_frame.assert_not_called()
+        self.client.get_right_wrist_frame.assert_not_called()
+
+    def test_frame_queues_legacy_episode_without_trajectory_json(self):
         self.session.start()
-        recorder = FakeRecorder.instances[0]
-        self.assertEqual(
-            recorder.start_kwargs["arm_coordinate_convention"],
-            H1_ARM_COORDINATE_CONVENTION,
-        )
-        self.assertEqual(
-            recorder.start_kwargs["robot_model_revision"],
-            H1_MODEL_REVISION,
-        )
         ik = LMIKResult(
             arm_q=np.full(14, 0.2),
             converged=True,
@@ -634,9 +772,66 @@ class FormalRecordingSessionTest(unittest.TestCase):
 
         self.assertEqual(len(self.writer.frames), 1)
         self.assertEqual(self.writer.saved, 1)
-        self.assertEqual(len(recorder.points), 1)
-        np.testing.assert_allclose(recorder.points[0][0], np.degrees(0.15))
-        self.assertTrue(recorder.finished)
+
+    def test_raw_only_session_does_not_queue_legacy_images(self):
+        raw = FakeRawWriter()
+        self.image.jpg = b"jpeg"
+        with tempfile.TemporaryDirectory() as tmp:
+            session = FormalRecordingSession(
+                image_client=self.client,
+                camera_config=self.camera_config,
+                camera_key_plan=[
+                    {
+                        "source": "head",
+                        "color_key": "color_0",
+                    },
+                    {
+                        "source": "left_wrist",
+                        "color_key": "color_1",
+                    },
+                    {
+                        "source": "right_wrist",
+                        "color_key": "color_2",
+                    },
+                ],
+                legacy_episode_writer=None,
+                output_root=Path(tmp),
+                task_name="raw_only",
+                task_description="raw only",
+                frequency=20,
+                sync_tolerance_s=1e-4,
+                camera_sync_tolerance_s=0.02,
+                raw_writer=raw,
+            )
+            session.start()
+            batch = session.capture_camera_batch()
+            self.assertEqual(batch.colors, {})
+            self.assertEqual(batch.depths, {})
+            self.assertEqual(
+                batch.timestamps_ns,
+                {"color_0": 100, "color_1": 100, "color_2": 100},
+            )
+            session.add_frame(
+                camera_batch=batch,
+                measured_q=np.full(14, 0.1),
+                command_q=np.full(14, 0.15),
+                raw_ik_q=np.full(14, 0.2),
+                ik_result=LMIKResult(
+                    arm_q=np.full(14, 0.2),
+                    converged=True,
+                    iterations=3,
+                    translation_error_norm=0.001,
+                    rotation_error_norm=0.002,
+                ),
+                accepted_approximately=False,
+                control_cycle_timestamp_ns=200,
+                robot_step_done_timestamp_ns=300,
+            )
+            session.stop()
+
+        self.assertEqual(raw.started[0][0], 0)
+        self.assertEqual(raw.stopped, 1)
+        self.assertEqual([name for name, _ in raw.events], ["control"])
 
 if __name__ == "__main__":
     unittest.main()

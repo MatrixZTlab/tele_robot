@@ -24,6 +24,14 @@ _H1_KP = [5000.0, 3000.0, 500.0, 500.0, 800.0, 800.0, 800.0, 800.0,
 _H1_KD = [100.0, 80.0, 20.0, 20.0, 30.0, 30.0, 30.0, 30.0, 20.0,
           20.0, 20.0, 30.0, 30.0, 30.0, 30.0, 20.0, 20.0, 20.0]
 
+# Legacy teleoperation starts conservatively and raises the command rate limit
+# over five seconds.  Keep the 2 rad/s start, but cap the ramp at 10 rad/s so
+# an IK target cannot run as far ahead of the physical arms as the old 30 rad/s
+# setting allowed.
+_H1_TELEOP_DQ_START = 2.0
+_H1_TELEOP_DQ_MAX = 10.0
+_H1_TELEOP_DQ_RAMP_S = 5.0
+
 
 class H1ArmController(BaseArmController):
     """TOPSTAR_H1 机械臂控制器 — 基于 ROS2，事件驱动发布。"""
@@ -34,14 +42,15 @@ class H1ArmController(BaseArmController):
         logger.info("H1 ArmController: initializing...")
 
         self.dt = 1.0 / self.frequency
-        self.dq_limit = 2.0  # rad/s 默认
+        self.dq_limit = _H1_TELEOP_DQ_START  # rad/s 默认
         self.head_yaw_limit = (-1.5708, 1.5708)
         self.head_pitch_limit = (-0.6457718, 0.4363323)
         self.head_pitch_ik_limit = (-0.4363323, 0.6457718)
         self.head_dq_limit = 15.0
         self.head_smooth_alpha = 0.8
-        self.home_head_q = np.array([0.0, np.deg2rad(-19.0)], dtype=float)
-        #self.home_head_q = np.array([0.0, np.deg2rad(0.0)], dtype=float)
+        # Keep the head camera at the verified data-collection view.  In the
+        # IK convention pitch=-28 deg maps to hardware pitch=+28 deg.
+        self.home_head_q = np.array([0.0, np.deg2rad(-28.0)], dtype=float)
         # Topstar_Revise.urdf uses the hardware sign for every arm joint.
         self.joint_sign_map = H1_ARM_HW_TO_MODEL_SIGN.copy()
 
@@ -336,8 +345,8 @@ class H1ArmController(BaseArmController):
 
     def speed_instant_max(self):
         self._speed_gradual_max = False
-        self._dq_limit_override = 30.0
-        self.dq_limit = 30.0
+        self._dq_limit_override = _H1_TELEOP_DQ_MAX
+        self.dq_limit = _H1_TELEOP_DQ_MAX
 
     def get_last_published_dual_arm_q(self):
         with self.publish_lock:
@@ -433,9 +442,13 @@ class H1ArmController(BaseArmController):
                     if self._gradual_start_time is None:
                         self._gradual_start_time = time.perf_counter()
                     t = time.perf_counter() - self._gradual_start_time
-                    self.dq_limit = 2.0 + 28.0 * min(1.0, t / 5.0)
+                    ramp = min(1.0, t / _H1_TELEOP_DQ_RAMP_S)
+                    self.dq_limit = (
+                        _H1_TELEOP_DQ_START
+                        + (_H1_TELEOP_DQ_MAX - _H1_TELEOP_DQ_START) * ramp
+                    )
                 else:
-                    self.dq_limit = 2.0
+                    self.dq_limit = _H1_TELEOP_DQ_START
 
                 # MoveJ 抑制
                 if time.monotonic() < self._joint_hold_until:

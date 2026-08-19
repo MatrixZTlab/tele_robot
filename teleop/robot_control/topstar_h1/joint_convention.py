@@ -76,25 +76,123 @@ H1_ARM_SAFETY_MARGIN_RAD = math.radians(5.0)
 H1_ARM_SAFE_LOWER = H1_ARM_HARD_LOWER + H1_ARM_SAFETY_MARGIN_RAD
 H1_ARM_SAFE_UPPER = H1_ARM_HARD_UPPER - H1_ARM_SAFETY_MARGIN_RAD
 
-# Operator-provided X-View HOME pose, converted from degrees and expressed in
-# the revised hardware-aligned arm convention.  The values are kept at the
-# precision used by the existing MoveJ implementation.
+# Previous operator-validated X-View HOME captured on 2026-08-10.  Keep this
+# available so the trial HOME below can be reverted without reconstructing it.
+H1_ARM_PREVIOUS_HOME_Q = np.array(
+    [
+        # Robot-left J1..J7
+        -1.322488334,
+        -0.800390542,
+        0.287473181,
+        -1.509046578,
+        -2.502104016,
+        -0.817320235,
+        -0.526391302,
+        # Robot-right J1..J7
+        1.056622329,
+        -0.701098761,
+        0.062639867,
+        -1.608774691,
+        2.476866555,
+        -0.845629476,
+        0.410972679,
+    ],
+    dtype=np.float64,
+)
+
+# Retained trial X-View HOME captured on 2026-08-12.
+H1_ARM_HOME_Q_2026_08_12 = np.array(
+    [
+        # Robot-left J1..J7
+        -1.245100435080,
+        -0.767246739177,
+        0.243124364803,
+        -1.148479007690,
+        -2.212990225066,
+        -0.503894008343,
+        -0.953019584759,
+        # Robot-right J1..J7
+        0.986494999812,
+        -0.585016911976,
+        0.187954507147,
+        -1.333972600592,
+        2.182796029007,
+        -0.435773807638,
+        0.766408981136,
+    ],
+    dtype=np.float64,
+)
+
+# Preserve the complete HOME that was active before the right-arm adjustment
+# captured at 11:21 on 2026-08-13.
+H1_ARM_HOME_Q_BEFORE_RIGHT_ARM_2026_08_13_1121 = np.array(
+    [
+        # Robot-left J1..J7 (lower X-View window)
+        -1.251523246728,
+        -0.617270596553,
+        0.290911479722,
+        -1.399317727786,
+        -2.319420402853,
+        -0.731397676341,
+        -0.829869152738,
+        # Robot-right J1..J7 (upper X-View window)
+        0.988833741010,
+        -0.655091881444,
+        0.185964831800,
+        -1.372282577673,
+        2.200947453227,
+        -0.541331320799,
+        0.749025501786,
+    ],
+    dtype=np.float64,
+)
+
+# Preserve the HOME that was active immediately before the complete two-arm
+# X-View recapture at 16:59 on 2026-08-13.
+H1_ARM_HOME_Q_BEFORE_2026_08_13_1659 = np.array(
+    [
+        # Robot-left J1..J7
+        -1.251523246728,
+        -0.617270596553,
+        0.290911479722,
+        -1.399317727786,
+        -2.319420402853,
+        -0.731397676341,
+        -0.829869152738,
+        # Robot-right J1..J7
+        0.988694114670,
+        -0.655196601199,
+        0.185964831800,
+        -1.372265124381,
+        2.226341993844,
+        -0.541313867506,
+        0.712425947372,
+    ],
+    dtype=np.float64,
+)
+
+# Operator-selected HOME captured from X-View at 16:59 on 2026-08-13.
+# Every teleoperation array is robot-left J1..J7 followed by right J1..J7.
 H1_ARM_HOME_Q = np.array(
     [
-        -1.496550020,
-        -0.761539513,
-        0.203383218,
-        -1.487247416,
-        -2.828934371,
-        -0.727837205,
-        2.789105958,
-        1.496550020,
-        -0.761539513,
-        -0.203383218,
-        -1.487247416,
-        2.828934371,
-        -0.727837205,
-        -2.789105958,
+        # Robot-left J1..J7: [-71.599, -25.196, 22.378, -98.153,
+        #                     -131.722, -51.871, -44.426] degrees
+        -1.249638291135,
+        -0.439753158332,
+        0.390569780011,
+        -1.713093020710,
+        -2.298982597312,
+        -0.905319736302,
+        -0.775379973491,
+        # Robot-right J1..J7: [72.050, -24.118, -23.068, -97.438,
+        #                      124.634, -47.599, 54.002] degrees
+        1.257509726062,
+        -0.420938508996,
+        -0.402612551850,
+        -1.700613916558,
+        2.175273659931,
+        -0.830759270657,
+        0.942512702662,
     ],
     dtype=np.float64,
 )
@@ -105,6 +203,10 @@ __all__ = [
     "H1_ARM_HARD_LOWER",
     "H1_ARM_HARD_UPPER",
     "H1_ARM_HOME_Q",
+    "H1_ARM_HOME_Q_BEFORE_2026_08_13_1659",
+    "H1_ARM_HOME_Q_BEFORE_RIGHT_ARM_2026_08_13_1121",
+    "H1_ARM_HOME_Q_2026_08_12",
+    "H1_ARM_PREVIOUS_HOME_Q",
     "H1_ARM_HW_TO_MODEL_SIGN",
     "H1_ARM_SAFE_LOWER",
     "H1_ARM_SAFE_UPPER",

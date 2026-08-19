@@ -33,6 +33,32 @@ def test_raw_writer_keeps_independent_streams(tmp_path):
     assert manifest["written"]["camera_head_camera"] == 1
 
 
+def test_raw_writer_ignores_duplicate_camera_packets_and_preserves_reset_epoch(tmp_path):
+    writer = RawSessionWriter(tmp_path / "task", queue_size=32)
+    session = writer.start_episode(4)
+    packet = {"sequence": 7, "jpg": b"first", "timestamp_ns": time.time_ns()}
+    assert writer.append_camera_packet("head_camera", packet)
+    assert writer.append_camera_packet("head_camera", packet) is False
+    assert writer.append_camera_packet(
+        "head_camera", {"sequence": 1, "jpg": b"after-reset"}
+    )
+    writer.stop_episode()
+    writer.close()
+
+    rows = [
+        json.loads(line)
+        for line in (session / "streams" / "camera_head_camera.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert len(rows) == 2
+    assert rows[0]["writer_stream_epoch"] == 0
+    assert rows[1]["writer_stream_epoch"] == 1
+    assert rows[0]["image_path"] != rows[1]["image_path"]
+    manifest = json.loads((session / "manifest.json").read_text())
+    assert manifest["ignored_duplicates"]["camera.head_camera"] == 1
+
+
 def test_raw_writer_marks_episode_incomplete_when_background_write_fails(tmp_path):
     writer = RawSessionWriter(tmp_path / "task", queue_size=8)
     session = writer.start_episode(2)

@@ -287,6 +287,40 @@ def test_driver_toggle_uses_measured_fk_and_rebases_on_unlock(monkeypatch):
     assert len(driver.controller.reset_values) == 2
 
 
+def test_driver_toggle_is_supported_in_relative_pose_mode():
+    driver = object.__new__(_TestDriver)
+    driver._dual_object_control = _controller()
+    driver._dual_object_toggle_requested = False
+    driver._dual_object_last_warning_s = 0.0
+    driver.simulation_mode = True
+    driver.ik = _FakeIK()
+    driver.controller = _FakeArmController()
+    actual_left = _pose((0.3, 0.2, 1.0))
+    actual_right = _pose((0.3, -0.2, 1.0))
+    driver._get_current_ee_poses = lambda _q: (
+        actual_left.copy(), actual_right.copy()
+    )
+    driver._dual_object_targets_valid = lambda _left, _right: True
+    xr = XRProcessedData(
+        left_wrist_pose=_pose((-0.25, 0.0, 0.0)),
+        right_wrist_pose=_pose((0.25, 0.0, 0.0)),
+        head_kwargs={},
+    )
+
+    assert driver.request_dual_object_toggle()
+    output = driver._apply_dual_object_control(
+        xr,
+        np.zeros(14),
+        np.zeros(14),
+        state_receive_ns=0,
+        teleop_mode="relative_pose",
+    )
+
+    assert driver.dual_object_locked
+    np.testing.assert_allclose(output.left_wrist_pose, actual_left)
+    np.testing.assert_allclose(output.right_wrist_pose, actual_right)
+
+
 def test_driver_rejects_lock_while_arm_is_moving():
     driver = object.__new__(_TestDriver)
     driver._dual_object_control = _controller()

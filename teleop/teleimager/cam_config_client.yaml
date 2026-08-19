@@ -1,7 +1,7 @@
 head_camera:
   enable_zmq: true
   zmq_port: 55555
-  enable_webrtc: true
+  enable_webrtc: fasle
   webrtc_port: 60001
   webrtc_codec: h264
   type: orbbec
@@ -17,7 +17,7 @@ head_camera:
 left_wrist_camera:
   enable_zmq: true
   zmq_port: 55556
-  enable_webrtc: true
+  enable_webrtc: false
   webrtc_port: 60002
   webrtc_codec: h264
   type: orbbec
@@ -33,7 +33,7 @@ left_wrist_camera:
 right_wrist_camera:
   enable_zmq: true
   zmq_port: 55557
-  enable_webrtc: true
+  enable_webrtc: false
   webrtc_port: 60003
   webrtc_codec: h264
   type: orbbec

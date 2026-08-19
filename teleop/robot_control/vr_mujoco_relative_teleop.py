@@ -195,6 +195,7 @@ class VRRelativePoseTracker:
         ema_alpha: float = 0.8,
         position_deadband: float = 0.0,
         rotation_deadband_deg: float = 0.0,
+        lock_orientation: bool = False,
         negate_rot_xy: bool = False,
         translation_axis_sign: Sequence[float] = (1.0, 1.0, 1.0),
     ) -> None:
@@ -216,6 +217,7 @@ class VRRelativePoseTracker:
         self._ema_alpha = float(ema_alpha)
         self._position_deadband = float(position_deadband)
         self._rotation_deadband_rad = math.radians(rotation_deadband_deg)
+        self._lock_orientation = bool(lock_orientation)
         self._negate_rot_xy = bool(negate_rot_xy)
         translation_sign = np.asarray(translation_axis_sign, dtype=np.float64)
         if translation_sign.shape != (3,) or not np.all(
@@ -282,6 +284,13 @@ class VRRelativePoseTracker:
         if np.linalg.norm(self._smoothed_translation) < self._position_deadband:
             self._smoothed_translation = np.zeros(3, dtype=np.float64)
 
+        target = self._initial_ee_pose.copy()
+        target[:3, 3] += self._position_scale * self._smoothed_translation
+        if self._lock_orientation:
+            self._rotation_residual = np.eye(3, dtype=np.float64)
+            self._target_pose = target
+            return self.target_pose
+
         current_robot_rotation = self._basis @ _project_to_so3(
             wrist[:3, :3]
         ) @ self._basis.T
@@ -306,8 +315,6 @@ class VRRelativePoseTracker:
             relative_quaternion = np.array([0.0, 0.0, 0.0, 1.0])
         self._rotation_residual = _quaternion_to_matrix(relative_quaternion)
 
-        target = self._initial_ee_pose.copy()
-        target[:3, 3] += self._position_scale * self._smoothed_translation
         initial_ee_quaternion = _matrix_to_quaternion(
             self._initial_ee_pose[:3, :3]
         )
